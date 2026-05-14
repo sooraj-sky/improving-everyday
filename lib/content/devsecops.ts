@@ -1610,6 +1610,106 @@ docker run -e GITHUB_AUTH_TOKEN=\$GH_TOKEN \
 Checks include: Branch-Protection, Code-Review, Signed-Releases, Vulnerabilities, Token-Permissions, Secret detection.
 
 > **Tip:** Automate scorecard in CI and alert when the score drops below your threshold (e.g., 7/10). Publish the badge in README.md to signal security posture to external contributors and auditors.`,
+          interviewQuestions: [
+            {
+              question: "How do you implement compliance as code, and why is it better than periodic manual audits?",
+              difficulty: "mid" as const,
+              answer: `**Compliance as code** treats compliance requirements (GDPR, SOC 2, PCI DSS, HIPAA) as automated checks that run continuously, rather than point-in-time manual audits.
+
+**Why manual audits fail:**
+- Audits happen quarterly/annually — months of non-compliance go undetected
+- Auditors check a sample, not everything
+- "Point-in-time" attestation: compliant at audit time, drifts immediately after
+- Manual processes don't scale with cloud infrastructure (hundreds of resources)
+
+**Implementation with AWS Config + OPA:**
+\`\`\`bash
+# AWS Config rule: all S3 buckets must be encrypted:
+aws configservice put-config-rule --config-rule '{
+  "ConfigRuleName": "s3-bucket-server-side-encryption-enabled",
+  "Source": {
+    "Owner": "AWS",
+    "SourceIdentifier": "S3_BUCKET_SERVER_SIDE_ENCRYPTION_ENABLED"
+  }
+}'
+
+# AWS Config automatically evaluates all S3 buckets continuously
+# Non-compliant resources trigger SNS → PagerDuty or auto-remediation Lambda
+\`\`\`
+
+**IaC policy with Checkov:**
+\`\`\`bash
+# Block deployment if Terraform code violates security policies:
+checkov -d . --check CKV_AWS_21,CKV_AWS_18 --hard-fail-on HIGH
+# CKV_AWS_21: S3 versioning enabled
+# CKV_AWS_18: S3 access logging enabled
+\`\`\`
+
+**Continuous compliance dashboard:**
+\`\`\`bash
+# Security Hub aggregates findings from GuardDuty, Inspector, Config, Macie:
+aws securityhub get-findings \\
+  --filters '{"ComplianceStatus":[{"Value":"FAILED","Comparison":"EQUALS"}]}' \\
+  --query 'Findings[].{Resource:Resources[0].Id,Control:Title,Severity:Severity.Label}'
+\`\`\`
+
+**Benefits of continuous compliance:**
+- Real-time compliance posture (detect drift within minutes)
+- Scales with infrastructure (10 resources or 10,000 resources, same effort)
+- Audit evidence is automatically collected
+- Compliance becomes a normal part of deployment, not a blocker`,
+            },
+            {
+              question: "Walk me through how you would design the secret management strategy for a microservices application.",
+              difficulty: "senior" as const,
+              answer: `**The hierarchy of secret security (best to worst):**
+
+1. **Dynamic, short-lived credentials** (best): App gets credentials from Vault/AWS Secrets Manager at runtime, credentials expire in minutes/hours. No stored secrets anywhere.
+2. **Environment-injected at deploy time**: Kubernetes Secrets mounted as files, ECS task environment variables from Secrets Manager. Short-lived but not rotating.
+3. **Long-lived env vars in container**: Never rotated, leaked in logs, visible in container inspect.
+4. **Hardcoded in code** (worst): In version control forever.
+
+**Production-grade architecture:**
+
+**Option A — HashiCorp Vault with Kubernetes:**
+\`\`\`yaml
+# Vault Agent Injector annotates pods to automatically inject secrets:
+annotations:
+  vault.hashicorp.com/agent-inject: "true"
+  vault.hashicorp.com/role: "payments-service"
+  vault.hashicorp.com/agent-inject-secret-db-creds: "database/creds/payments-role"
+# Vault auto-renews credentials before they expire
+# App reads from /vault/secrets/db-creds (file, not env)
+\`\`\`
+
+**Option B — AWS Secrets Manager + IAM roles:**
+\`\`\`python
+# App fetches secrets at startup, caches with TTL:
+import boto3
+from functools import lru_cache
+
+@lru_cache(maxsize=None)
+def get_secret(secret_name):
+    client = boto3.client('secretsmanager')
+    return client.get_secret_value(SecretId=secret_name)['SecretString']
+
+# IAM task role grants: secretsmanager:GetSecretValue on specific ARN only
+# No access key needed — uses instance/task metadata credentials
+\`\`\`
+
+**Rotation strategy:**
+\`\`\`bash
+# Enable automatic rotation in Secrets Manager:
+aws secretsmanager rotate-secret \\
+  --secret-id prod/myapp/db-password \\
+  --rotation-lambda-arn arn:aws:lambda:...:function:SecretsManagerRotation \\
+  --rotation-rules AutomaticallyAfterDays=30
+\`\`\`
+
+**Audit trail:**
+Every secret access is logged in CloudTrail/Vault audit logs — who accessed what, when. Anomaly detection on unusual access patterns (e.g., Lambda function that usually accesses 10 secrets/day suddenly accessing 100 = potential data exfiltration).`,
+            },
+          ],
         },
       ],
     },

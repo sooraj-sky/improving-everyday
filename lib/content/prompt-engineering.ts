@@ -387,6 +387,93 @@ Rules:
 \`\`\`
 
 > **Tip:** When a model keeps doing something you don't want, put the constraint at the *end* of the prompt — LLMs tend to weight recent tokens more. "Don't use bullet points" at the start is weaker than "Return a single paragraph of prose, no lists or headers" at the end.`,
+          interviewQuestions: [
+            {
+              question: "What is the difference between zero-shot and few-shot prompting? When do you use each?",
+              difficulty: "junior" as const,
+              answer: `**Zero-shot prompting:** No examples provided. You rely on the model's training knowledge to understand the task from instructions alone.
+
+\`\`\`
+Prompt: "Classify this email as spam or not spam: 'Get rich quick! Click here!'"
+Response: "Spam"
+\`\`\`
+
+Best for: Well-defined tasks the model has likely seen during training (translation, summarization, basic classification, Q&A).
+
+**Few-shot prompting:** Include 2–10 examples of input→output pairs before the actual question.
+
+\`\`\`
+Prompt:
+"Classify customer sentiment:
+Email: 'I love your product!' → Sentiment: Positive
+Email: 'This is broken and useless.' → Sentiment: Negative
+Email: 'It works but took 3 weeks to arrive.' → Sentiment: Mixed
+
+Now classify: 'Great quality but very expensive.' → Sentiment:"
+Response: "Mixed"
+\`\`\`
+
+**When to use few-shot:**
+- Custom classification with company-specific labels
+- Formatting requirements (teach the model your exact output format)
+- Edge cases that differ from common patterns
+- When zero-shot gives inconsistent results
+
+**How many examples:** 3–7 is usually optimal. More examples → more tokens → more cost. After ~8 examples, accuracy gains plateau for most tasks. For very complex tasks, fine-tuning (training on thousands of examples) outperforms few-shot.
+
+**Example quality matters:** Bad examples teach bad patterns. Ensure examples are diverse and representative.`,
+            },
+            {
+              question: "You're building a customer support chatbot and it keeps making up answers when it doesn't know. How do you fix this?",
+              difficulty: "mid" as const,
+              answer: `**Root cause:** LLMs are trained to be helpful and always produce output — they hallucinate rather than say "I don't know." Without grounding, they generate plausible-sounding false information.
+
+**Fix 1 — Strong system prompt constraints:**
+\`\`\`
+System: "You are a customer support agent for Acme Corp.
+CRITICAL RULES:
+- Only answer based on the provided knowledge base articles below
+- If the answer is not in the knowledge base, say exactly: 'I don't have information about that. Let me connect you with a human agent.'
+- NEVER guess, infer, or make up information
+- If uncertain, say you're uncertain
+
+Knowledge base:
+{retrieved_articles}
+"
+\`\`\`
+
+**Fix 2 — RAG (Retrieval Augmented Generation):**
+Instead of relying on model's training knowledge, retrieve relevant documents at query time:
+\`\`\`python
+# 1. Embed the user question
+# 2. Find similar documents in your knowledge base
+# 3. Inject them into the prompt: "Answer ONLY based on these docs: {docs}"
+\`\`\`
+
+**Fix 3 — Confidence-based fallback:**
+\`\`\`python
+response = llm.generate(prompt)
+
+# Ask the model to self-assess:
+confidence_check = llm.generate(
+    f"On a scale 1-10, how confident are you this answer is accurate: {response}"
+)
+
+if confidence < 7:
+    return "I'm not certain. Let me escalate to a human agent."
+\`\`\`
+
+**Fix 4 — Structured output with citations:**
+\`\`\`
+Answer: "Your order ships in 3-5 business days."
+Source: Article #1203 - "Shipping Policy"
+Confidence: High
+\`\`\`
+Force the model to cite its source — if it can't cite, it shouldn't answer.
+
+**Evaluation:** Test with questions that don't have answers in your KB. Measure "I don't know" rate vs. hallucination rate.`,
+            },
+          ],
         },
         {
           id: "chain-of-thought",
@@ -1623,6 +1710,99 @@ client.messages.create(
 \`\`\`
 
 > **Tip:** Track your LLM calls with **LangSmith**, **Langfuse** (open-source), or **Weights & Biases** from day one. Retroactively adding observability is painful. You need traces to debug why your agent made a wrong decision three days ago.`,
+          interviewQuestions: [
+            {
+              question: "What is RAG and when should you use it instead of fine-tuning?",
+              difficulty: "mid" as const,
+              answer: `**RAG (Retrieval Augmented Generation):** At query time, retrieve relevant documents from a knowledge base and inject them into the prompt context. The model answers based on the retrieved documents rather than its training data.
+
+**Fine-tuning:** Train the model on your specific data, updating the model's weights. The knowledge is baked into the model itself.
+
+**When to use RAG:**
+- Knowledge changes frequently (product docs, pricing, policies)
+- Data is confidential and can't leave your environment
+- You need citations/sources for answers
+- Large knowledge base (10K+ documents — impractical in context window)
+- You need to update knowledge without retraining
+
+**When to use fine-tuning:**
+- Teaching the model a specific style, tone, or output format
+- Teaching a specialized domain where the base model lacks vocabulary/concepts
+- Reducing prompt length (learned behavior needs fewer instructions)
+- Low-latency requirements (no retrieval latency)
+- Task doesn't require external knowledge (code generation style, specific JSON formats)
+
+**In practice, use both:**
+\`\`\`
+Fine-tune for: communication style, output format, domain vocabulary
+RAG for: factual knowledge, dynamic data, citations
+\`\`\`
+
+**RAG is NOT:** A solution for all hallucination problems. If the retrieval fails to find the relevant document, the model still hallucinates. Good RAG requires good chunking, embedding, and retrieval — not just plugging in a vector store.`,
+            },
+            {
+              question: "How do you evaluate an LLM application in production? What metrics do you track?",
+              difficulty: "senior" as const,
+              answer: `**The LLM evaluation stack:**
+
+**1. Offline evaluation (before deployment):**
+\`\`\`python
+# Build an evaluation dataset (golden examples):
+eval_set = [
+    {"input": "What's your return policy?",
+     "expected": "Returns accepted within 30 days"},
+    ...
+]
+
+# Metrics:
+# - Exact match (for structured outputs)
+# - BLEU/ROUGE (for text similarity — limited value for LLMs)
+# - LLM-as-judge (use a stronger model to evaluate responses)
+# - Human evaluation (ground truth, expensive but necessary)
+\`\`\`
+
+**2. Online production metrics:**
+
+\`\`\`python
+# Track per-call with LangSmith/Langfuse:
+metrics = {
+    # Quality:
+    "user_thumbs_up_rate": ...,      # user satisfaction
+    "escalation_rate": ...,           # handoff to human (proxy for failure)
+    "task_completion_rate": ...,      # did user get their answer?
+
+    # Safety:
+    "harmful_content_rate": ...,      # % of responses flagged by safety filter
+    "refusal_rate": ...,              # % of over-refused benign requests
+
+    # Cost:
+    "tokens_per_request": ...,        # input + output tokens
+    "cost_per_request": ...,          # tokens × price per token
+    "latency_p50_p95_p99": ...,      # time to first token, total
+
+    # RAG-specific:
+    "context_recall": ...,            # retrieved chunk contained the answer
+    "faithfulness": ...,              # answer grounded in retrieved context
+}
+\`\`\`
+
+**3. Regression testing pipeline:**
+\`\`\`python
+# When you update the prompt or model version:
+# 1. Run new version against eval set
+# 2. Compare to production baseline
+# 3. Block deployment if quality drops > 5% or safety metrics worsen
+
+# A/B testing:
+# Route 5% of traffic to new prompt
+# Compare metrics after 1000 requests
+# Promote if better or roll back if worse
+\`\`\`
+
+**4. Trace-level debugging:**
+Every LLM call logged with: prompt, model, parameters, response, latency, token count, retrieval results (for RAG). When a user reports a bad answer, you can replay the exact trace.`,
+            },
+          ],
         },
       ],
     },
