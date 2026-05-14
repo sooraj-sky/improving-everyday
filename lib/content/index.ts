@@ -9,6 +9,10 @@ import { devsecopsTrack } from "./devsecops";
 import { awsTrack } from "./aws";
 import { promptEngineeringTrack } from "./prompt-engineering";
 import { kubernetesTrack } from "./kubernetes";
+import { troubleshootingTrack } from "./troubleshooting";
+import { sshProtocolsTrack } from "./ssh-protocols";
+import { scriptingTrack } from "./scripting";
+import { webTechnologyTrack } from "./web-technology";
 import type { Track, LessonWithContext, Module, Lesson } from "./types";
 
 export * from "./types";
@@ -25,6 +29,10 @@ export const tracks: Track[] = [
   awsTrack,
   promptEngineeringTrack,
   kubernetesTrack,
+  troubleshootingTrack,
+  sshProtocolsTrack,
+  scriptingTrack,
+  webTechnologyTrack,
 ];
 
 export function getTrack(trackId: string): Track | undefined {

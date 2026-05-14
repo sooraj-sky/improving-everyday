@@ -25,6 +25,11 @@ import {
   Cloud,
   Sparkles,
   Play,
+  Wrench,
+  Scale,
+  Monitor,
+  FileCode,
+  Lock,
 } from "lucide-react";
 import { AppShell } from "@/components/layout/AppShell";
 import { Progress } from "@/components/ui/progress";
@@ -47,6 +52,11 @@ const TRACK_ICONS: Record<string, React.ElementType> = {
   aws: Cloud,
   "prompt-engineering": Sparkles,
   kubernetes: Layers,
+  troubleshooting: Wrench,
+  compliance: Scale,
+  "web-technology": Monitor,
+  scripting: FileCode,
+  "ssh-protocols": Lock,
 };
 
 const LESSON_TYPE_ICONS: Record<string, React.ElementType> = {

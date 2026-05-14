@@ -1,9 +1,18 @@
 export type LessonType = "lesson" | "lab" | "quiz" | "project" | "exercise";
 export type DifficultyLevel = "beginner" | "intermediate" | "advanced";
+export type QuizQuestionType = "scenario" | "hands-on";
 
 export interface InterviewQuestion {
   question: string;
   answer: string;
+  difficulty?: "junior" | "mid" | "senior";
+}
+
+export interface QuizQuestion {
+  question: string;
+  answer: string;
+  type: QuizQuestionType;
+  hint?: string;
   difficulty?: "junior" | "mid" | "senior";
 }
 
@@ -17,6 +26,7 @@ export interface Lesson {
   objectives?: string[];
   tags?: string[];
   interviewQuestions?: InterviewQuestion[];
+  quizQuestions?: QuizQuestion[];
 }
 
 export interface Module {

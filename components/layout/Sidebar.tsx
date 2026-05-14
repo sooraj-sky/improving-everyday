@@ -23,6 +23,11 @@ import {
   Layers,
   CheckCircle2,
   Circle,
+  Wrench,
+  Scale,
+  Monitor,
+  FileCode,
+  Lock,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { tracks, getTotalLessons } from "@/lib/content";
@@ -42,6 +47,11 @@ const TRACK_ICONS: Record<string, React.ElementType> = {
   aws: Cloud,
   "prompt-engineering": Sparkles,
   kubernetes: Layers,
+  troubleshooting: Wrench,
+  compliance: Scale,
+  "web-technology": Monitor,
+  scripting: FileCode,
+  "ssh-protocols": Lock,
 };
 
 const LESSON_TYPE_ICONS: Record<string, React.ElementType> = {

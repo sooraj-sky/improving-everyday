@@ -27,12 +27,18 @@ import {
   Bookmark,
   Share2,
   NotebookPen,
+  Wrench,
+  Scale,
+  Monitor,
+  FileCode,
+  Lock,
 } from "lucide-react";
 import { AppShell } from "@/components/layout/AppShell";
 import { LessonContent } from "@/components/lesson/LessonContent";
 import { TableOfContents } from "@/components/lesson/TableOfContents";
 import { NotesPanel } from "@/components/lesson/NotesPanel";
 import { InterviewQuestions } from "@/components/lesson/InterviewQuestions";
+import { QuizSection } from "@/components/lesson/QuizSection";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
@@ -56,6 +62,11 @@ const TRACK_ICONS: Record<string, React.ElementType> = {
   aws: Cloud,
   "prompt-engineering": Sparkles,
   kubernetes: Layers,
+  troubleshooting: Wrench,
+  compliance: Scale,
+  "web-technology": Monitor,
+  scripting: FileCode,
+  "ssh-protocols": Lock,
 };
 
 const LESSON_TYPE_CONFIG: Record<string, { icon: React.ElementType; label: string; color: string }> = {
@@ -192,6 +203,9 @@ export default function LessonPage() {
             <LessonContent content={lesson.content} />
             {lesson.interviewQuestions && lesson.interviewQuestions.length > 0 && (
               <InterviewQuestions questions={lesson.interviewQuestions} />
+            )}
+            {lesson.quizQuestions && lesson.quizQuestions.length > 0 && (
+              <QuizSection questions={lesson.quizQuestions} />
             )}
           </motion.div>
 
