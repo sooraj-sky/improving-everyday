@@ -214,19 +214,74 @@ This matters for: \`git log --author\` filtering, contribution graphs, and audit
             "Set up SSH keys and GPG commit signing",
             "Understand the config file hierarchy and precedence rules",
           ],
-          content: `## Config Hierarchy
+          content: `## Config Hierarchy — How Git Merges Settings
 
-Three levels, each overrides the one above:
+Git reads configuration from up to four levels and merges them at runtime, with lower levels overriding higher ones:
 
 \`\`\`
-/etc/gitconfig        system  (all users)         <- lowest priority
-~/.gitconfig          global  (your user account)
-.git/config           local   (this repo only)    <- highest priority
+/etc/gitconfig             system   (every user on this machine)   ← lowest priority
+~/.gitconfig               global   (your user account only)
+.git/config                local    (this repository only)
+.git/config.worktree       worktree (this specific worktree — rare) ← highest priority
 \`\`\`
+
+This cascade means you can set organisation-wide defaults at the system level, personal preferences globally, and project-specific overrides locally — without ever touching the global file for a one-off change.
+
+### Where Each File Lives and Who Owns It
+
+**System** (\`/etc/gitconfig\` on Linux/macOS, \`C:\\ProgramData\\Git\\config\` on Windows): Written by the OS package manager or your IT team. Sets safe defaults for every developer on a shared machine — e.g., a corporate proxy or a mandatory \`init.defaultBranch\`. You need root/admin to edit it.
+
+**Global** (\`~/.gitconfig\` or \`~/.config/git/config\`): Your personal settings. This is where your name, email, preferred editor, and aliases live. Everything you set with \`--global\` goes here.
+
+**Local** (\`.git/config\` inside the repository): Repository-specific settings. A \`--local\` write goes here and overrides global for this repo only. Version-controlled projects never commit this file because it contains local paths and personal settings.
+
+**Worktree** (\`.git/config.worktree\`): Only relevant when using \`git worktree\`. Allows per-worktree configuration within the same repository — almost never used directly.
 
 \`\`\`bash
-git config --list --show-origin   # see all settings + which file they came from
+# See every setting AND which file it came from:
+git config --list --show-origin
+# file:/etc/gitconfig         core.autocrlf=input
+# file:/Users/alice/.gitconfig  user.name=Alice Chen
+# file:.git/config              branch.main.remote=origin
+
+# Check a single key (shows the winning value after cascade):
+git config user.email
+
+# Check a key at a specific level:
+git config --global user.email
+git config --local core.editor
+
+# Edit a config file directly in your editor:
+git config --global --edit   # opens ~/.gitconfig
 \`\`\`
+
+### The includeIf Directive — Context-Aware Config
+
+A powerful feature most developers don't know: you can conditionally include entire config files based on directory path. This is how you use your personal email for hobby projects and your work email for company repos — without ever thinking about it:
+
+\`\`\`ini
+# ~/.gitconfig
+[user]
+  name = Alice Chen
+  email = alice@personal.com
+
+[includeIf "gitdir:~/work/"]
+  path = ~/.gitconfig-work       # applied to any repo under ~/work/
+
+[includeIf "gitdir:~/clients/acme/"]
+  path = ~/.gitconfig-acme
+\`\`\`
+
+\`\`\`ini
+# ~/.gitconfig-work
+[user]
+  email = alice@company.com
+  signingkey = WORK_GPG_KEY_ID
+[commit]
+  gpgSign = true
+\`\`\`
+
+Now every repo under \`~/work/\` automatically gets the work identity — zero manual configuration per repo.
 
 ---
 
@@ -238,7 +293,7 @@ git config --global user.email "alice@company.com"
 
 # Editor (choose yours)
 git config --global core.editor "vim"
-# VS Code: "code --wait"  |  Neovim: "nvim"
+# VS Code: "code --wait"  |  Neovim: "nvim"  |  nano: "nano"
 
 # Modern defaults
 git config --global init.defaultBranch main
@@ -250,74 +305,150 @@ git config --global commit.verbose true         # show full diff when writing me
 
 # Line endings (commit LF, checkout platform-native)
 git config --global core.autocrlf input         # Linux/macOS
+# git config --global core.autocrlf true        # Windows (converts to CRLF on checkout)
+
+# Rerere: re-use recorded resolution (remembers how you resolved a conflict)
+git config --global rerere.enabled true         # saves hours on long-lived branches
 \`\`\`
+
+### Why These Settings Matter
+
+**\`diff.algorithm histogram\`** — Git's default "myers" algorithm works well for code but struggles with moved blocks. Histogram diff produces cleaner output that is easier to read in code review. It is strictly better for source code; there is no downside.
+
+**\`pull.rebase true\`** — When you \`git pull\`, instead of merging the remote branch into your local branch (creating a merge commit), Git rebases your local commits on top of the remote. This keeps history linear and avoids the infamous "Merge branch 'main' of github.com/org/repo" clutter that pollutes logs.
+
+**\`push.autoSetupRemote true\`** — Without this, your first \`git push\` on a new branch fails with a verbose error asking you to specify \`--set-upstream\`. With this set, Git automatically establishes tracking and pushes. Save thousands of keystrokes over a career.
+
+**\`rerere.enabled true\`** — "Reuse Recorded Resolution". When you resolve a merge conflict, Git memorises the resolution. If the same conflict appears again (common during repeated rebases), Git applies the saved resolution automatically. Essential for long-lived feature branches.
 
 ---
 
 ## Power Aliases
 
+Aliases are shell-shortcut definitions stored in \`~/.gitconfig\`. They save keystrokes and embed best-practice flags so you use them consistently:
+
 \`\`\`bash
 git config --global alias.st "status -sb"
+# -s: short format  -b: show branch tracking info
+
 git config --global alias.lg "log --oneline --decorate --graph --all"
+# --graph: ASCII branch diagram  --all: show all branches not just HEAD
+
 git config --global alias.lp "log -p --follow"
+# -p: show patch (full diff)  --follow: track file renames
+
 git config --global alias.br "branch -vv"
+# -vv: show tracking branch + ahead/behind counts
+
 git config --global alias.last "log -1 HEAD --stat"
+# last commit with file change summary
+
 git config --global alias.undo "reset --soft HEAD~1"
+# uncommit but keep changes staged (safe undo)
+
 git config --global alias.amend "commit --amend --no-edit"
+# add staged changes to last commit, keep same message
+
 git config --global alias.unstage "reset HEAD --"
+# move staged changes back to working directory
+
 git config --global alias.changed "diff --name-only HEAD~1 HEAD"
+# files changed in last commit
+
 git config --global alias.fpush "push --force-with-lease"
+# safer force push: fails if someone else pushed (unlike --force)
+
 git config --global alias.contributors "shortlog -sn --all"
+# count commits per author across all branches
 \`\`\`
 
 ---
 
 ## SSH Key Setup
 
+SSH keys authenticate you to GitHub/GitLab without a password on every push. Ed25519 is the modern standard — shorter key, faster operations, more secure than RSA-4096.
+
 \`\`\`bash
 # Generate Ed25519 key (preferred over RSA)
+# -t: key type  -C: comment (label for the key)  -f: output file
 ssh-keygen -t ed25519 -C "alice@company.com" -f ~/.ssh/id_ed25519_github
 
-# Add to agent
+# Add to the SSH agent (manages keys in memory for this session)
 eval "$(ssh-agent -s)"
 ssh-add ~/.ssh/id_ed25519_github
 
-# ~/.ssh/config
+# ~/.ssh/config — per-host settings
 Host github.com
   HostName github.com
   User git
   IdentityFile ~/.ssh/id_ed25519_github
-  AddKeysToAgent yes
+  AddKeysToAgent yes          # auto-add to agent on first use
 
-# Copy public key -> GitHub Settings -> SSH Keys
+# Copy the PUBLIC key to GitHub Settings -> SSH Keys
 cat ~/.ssh/id_ed25519_github.pub
+# ssh-ed25519 AAAA... alice@company.com
 
-# Test
+# Test the connection
 ssh -T git@github.com
-# Hi alice! You've successfully authenticated...
+# Hi alice! You've successfully authenticated, but GitHub does not provide shell access.
 \`\`\`
+
+### Why SSH Over HTTPS?
+
+HTTPS requires a personal access token (PAT) stored in a credential manager or re-entered on every push. SSH keys are more ergonomic and just as secure. Once set up, they work silently forever. For CI/CD systems, a **deploy key** (a repo-specific SSH key with read-only or write access) is more granular than a PAT.
 
 ---
 
-## GPG Commit Signing
+## GPG Commit Signing — Proving Authorship
+
+Without signing, anyone who knows your email address can impersonate you in a commit (\`git commit --author "Alice Chen <alice@company.com>"\`). GPG signing creates a cryptographic proof that the commit came from whoever holds your private key.
 
 \`\`\`bash
-gpg --full-generate-key           # RSA 4096
+gpg --full-generate-key           # choose RSA 4096
 
 gpg --list-secret-keys --keyid-format=long
-# sec rsa4096/3AA5C34371567BD2 ...
+# sec rsa4096/3AA5C34371567BD2 2024-01-01 [SC]
 
 git config --global user.signingkey 3AA5C34371567BD2
-git config --global commit.gpgSign true
+git config --global commit.gpgSign true    # sign every commit automatically
+git config --global tag.gpgSign true       # sign tags too
 
-# Export to GitHub Settings -> GPG Keys
-gpg --armor --export 3AA5C34371567BD2
+# Export public key to GitHub Settings -> GPG Keys:
+gpg --armor --export 3AA5C34371567BD2 | pbcopy  # macOS
+gpg --armor --export 3AA5C34371567BD2 | xclip   # Linux
 
-# Verify
+# Verify: commits show "Verified" badge on GitHub
 git log --show-signature -1
 \`\`\`
 
-> **Tip:** Configure \`push.autoSetupRemote true\` — this eliminates the \`git push --set-upstream origin feature/xyz\` ceremony every time you push a new branch. One setting, saves thousands of keystrokes over a career.`,
+### Common Pitfall: GPG and TTY Issues
+
+On headless CI servers, GPG prompts for a passphrase interactively and hangs. Fix:
+
+\`\`\`bash
+# Tell GPG which TTY to use:
+export GPG_TTY=$(tty)
+
+# Or use a passphrase-less key for CI:
+gpg --batch --passphrase '' --quick-gen-key "CI Bot <ci@company.com>"
+
+# Or use SSH signing instead of GPG (simpler for most teams):
+git config --global gpg.format ssh
+git config --global user.signingkey ~/.ssh/id_ed25519_github.pub
+\`\`\`
+
+### Production Pattern: Organisation-Wide Signing Policy
+
+GitHub and GitLab support **required commit signing** as a branch protection rule. Combined with \`includeIf\` for automatic per-repo config, you get cryptographically verified commits with zero developer friction:
+
+\`\`\`bash
+# 1. Distribute ~/.gitconfig-work via onboarding script
+# 2. Enable "Require signed commits" in branch protection
+# 3. Developers get the Verified badge automatically
+# 4. Unsigned commits are rejected by the branch protection rule
+\`\`\`
+
+> **Tip:** Configure \`push.autoSetupRemote true\` — this eliminates the \`git push --set-upstream origin feature/xyz\` ceremony every time you push a new branch. One setting, saves thousands of keystrokes over a career. And use \`includeIf\` with directory-based path conditions to auto-switch identities between personal and work repositories — zero mental overhead.`,
           interviewQuestions: [
             {
               question: "What is the difference between `git config --global` and `git config --local`? Give a real scenario where you'd use --local.",
@@ -383,110 +514,219 @@ Other uses: repo-specific merge strategies, different core.autocrlf settings, pe
             "Navigate history with relative refs and git log filters",
             "Use git blame and git log -L for deep code archaeology",
           ],
-          content: `## Commit Anatomy
+          content: `## Commit Anatomy — What Is Actually Stored
+
+A commit is a plain-text object Git stores in \`.git/objects/\`. Inspecting it raw reveals exactly what goes into a SHA-1 hash:
 
 \`\`\`bash
 git cat-file -p HEAD
 # tree   4b825dc...       <- root tree SHA (full project snapshot)
-# parent a1b2c3d4...      <- previous commit (absent on first commit)
+# parent a1b2c3d4...      <- previous commit SHA (absent on the very first commit)
 # author  Alice <a@co.com> 1700000000 +0530
 # committer Alice <a@co.com> 1700000000 +0530
-#
+#                          ↑ Unix timestamp  ↑ timezone offset
 # feat: add OAuth2 login
 #
 # Implements Google + GitHub OAuth2 providers.
 # Closes #142
 \`\`\`
 
-The commit message has a **subject line** (≤72 chars, imperative mood) and optional **body** separated by a blank line. Tools like \`git log --oneline\`, GitHub, and changelog generators all parse this format.
+### The SHA-1 is Deterministic and Tamper-Proof
+
+Git computes the commit's SHA-1 by hashing this exact text (plus a header). Every field contributes to the hash:
+
+- **tree SHA** — if any file changed, the tree SHA changes → commit SHA changes
+- **parent SHA** — reordering or rebasing produces a new parent SHA → new commit SHA
+- **author + committer** — changing the name, email, or timestamp changes the SHA
+- **message** — even a single character change produces a completely different SHA
+
+This is why \`git commit --amend\` creates a *new* object even if you only fix a typo in the message. The old object is not deleted — it stays in \`.git/objects/\` and is accessible via the reflog for 30 days.
+
+### Content-Addressable Storage in Practice
+
+The SHA-1 is both the object's identity and its integrity check. Git verifies every object it reads. If a bit flips on disk or in transit, the SHA mismatch is detected immediately:
+
+\`\`\`bash
+# Verify the entire object database:
+git fsck --full
+# Dangling commits, missing blobs, broken links all surface here
+
+# Verify a specific object:
+git cat-file -t a1b2c3d4   # "commit" — type check
+git cat-file -p a1b2c3d4   # dump the content
+\`\`\`
 
 ---
 
-## HEAD — The Current Position
+## Commit Messages — Why They Matter Far Beyond Code Review
 
-HEAD is almost always a symbolic ref pointing to a branch:
+A commit message is not just documentation for code review. It is a first-class data source for four critical production workflows:
+
+1. **\`git bisect\`** — when bisecting a regression, the first bad commit's message is your only clue about *what changed* at that point. "WIP" tells you nothing. "fix: increase JWT expiry to 30 days (was 5 minutes)" points directly to the bug.
+
+2. **\`git blame\` / \`git log -L\`** — when you're debugging why a function looks the way it does, the commit messages on each line tell the story. "refactor" without context is noise; "refactor: extract middleware to support rate limiting (see #234)" is a breadcrumb.
+
+3. **Automated changelogs** — tools like \`semantic-release\`, \`conventional-changelog\`, and \`release-please\` parse commit messages to generate release notes, bump version numbers (major/minor/patch), and tag releases. This only works with structured messages.
+
+4. **Code archaeology** — six months from now, when you can't remember why that weird \`if\` statement exists, \`git log -S "the weird condition"\` finds the commit. Its message is the institutional knowledge that explains *why*.
+
+### Conventional Commits Format
+
+\`\`\`
+<type>(<optional scope>): <subject>
+<blank line>
+<optional body>
+<blank line>
+<optional footer>
+\`\`\`
+
+\`\`\`bash
+# Examples:
+feat(auth): add OAuth2 login with Google and GitHub
+# ↑ triggers minor version bump in semantic-release
+
+fix(api): prevent race condition in session store (#342)
+# ↑ triggers patch version bump
+
+feat!: remove deprecated v1 API endpoints
+# ↑ '!' marks a breaking change → major version bump
+
+chore(deps): upgrade Next.js to 14.2.0
+# ↑ no version bump, but documented for changelog
+
+# Subject line rules:
+# - 72 chars max (GitHub wraps at 72 in most views)
+# - Imperative mood: "add OAuth2" not "added OAuth2" or "adds OAuth2"
+# - No trailing period
+# - Don't describe WHAT (the diff shows that) — describe WHY
+\`\`\`
+
+---
+
+## HEAD — Git's Current Position Pointer
+
+HEAD is a 41-byte file (\`ref: refs/heads/main\\n\`) that points to where you currently are:
 
 \`\`\`bash
 cat .git/HEAD
-# ref: refs/heads/main    <- attached HEAD (normal state)
+# ref: refs/heads/main    <- symbolic ref (normal, "attached" state)
 
 cat .git/refs/heads/main
-# a1b2c3d4...              <- commit SHA main points to
+# a1b2c3d4e5f6789abcdef0123456789abcdef01  <- 40-char SHA + newline
 \`\`\`
 
-When you commit, the branch pointer advances. HEAD indirectly follows.
+When you make a commit:
+1. Git writes the new commit object to \`.git/objects/\`
+2. Git reads the branch file (\`refs/heads/main\`) to find the parent
+3. Git writes the new commit SHA into the branch file
+4. HEAD still points to the branch — it indirectly follows the branch forward
+
+This is why switching branches is fast: Git just writes a new SHA into \`.git/HEAD\`.
 
 ---
 
-## Detached HEAD State
+## Detached HEAD — What It Is and Why It Happens
 
-HEAD points directly to a commit SHA instead of a branch:
+Detached HEAD means HEAD points directly to a commit SHA instead of a branch name:
 
 \`\`\`bash
-git checkout a1b2c3d4
+git checkout a1b2c3d4    # explicit SHA checkout
 cat .git/HEAD
-# a1b2c3d4...   <- detached — no branch label!
+# a1b2c3d4...            <- raw SHA, no branch reference!
+
+# Other ways you land in detached HEAD:
+git checkout v1.2.0      # checking out a tag
+git checkout origin/main # checking out a remote-tracking ref
+git bisect start         # bisect checks out commits directly
 \`\`\`
 
-Safe for exploration. Danger: commits made in detached HEAD have no branch anchoring them. Switch away and they're orphaned (garbage-collected after 30 days).
+**Why it is dangerous:** Commits you make in detached HEAD have no branch pointing to them. When you run \`git switch main\`, HEAD moves back to the branch and your experimental commits become "orphaned" — unreachable through normal refs. Git garbage-collects orphaned objects after 30 days.
 
 \`\`\`bash
-# Safe workflow
-git checkout abc123         # explore
-# Make commits if needed...
-git checkout -b save-this   # CREATE A BRANCH before leaving!
+# Safe exploration workflow:
+git checkout abc123               # explore — you're in detached HEAD
+# Found something useful? Create a branch BEFORE leaving:
+git switch -c experiment/save-this
 
-# Recovery: orphaned commits via reflog
-git reflog                  # find the SHA
-git branch rescued abc123   # recreate
+# Already switched away and lost your work?
+git reflog                        # find the orphaned commit SHA
+# HEAD@{3}: commit: my experimental changes
+git branch rescued-work HEAD@{3}  # create branch at that SHA
 \`\`\`
 
 ---
 
-## Amending Commits
+## Amending Commits — Rewriting the Last Commit
 
 \`\`\`bash
-# Change the last commit message
+# Fix the last commit message:
 git commit --amend -m "feat: add OAuth2 (Google + GitHub) (#142)"
 
-# Add a forgotten file
+# Add a forgotten file to the last commit:
 git add forgotten.py
-git commit --amend --no-edit    # same message
+git commit --amend --no-edit    # keep the same message
 
-# Amend creates a NEW commit object. Old one stays in reflog 30 days.
-# Never amend commits already pushed to shared branches.
+# Change the author of the last commit:
+git commit --amend --reset-author   # uses current git config identity
+
+# Amend with a specific author:
+git commit --amend --author="Alice Chen <alice@company.com>"
 \`\`\`
+
+**What amend actually does:** It creates a completely new commit object (new SHA) and updates the branch pointer to it. The original commit stays in \`.git/objects/\` and is referenced by the reflog. It is not deleted — it is simply unreachable via normal refs.
+
+**The golden rule:** Never amend commits that have been pushed to a shared branch. Other developers have the original SHA. If you amend and force-push, their local history diverges.
 
 ---
 
 ## Navigating History
 
 \`\`\`bash
-# Relative refs
-HEAD~1       # one commit back
+# Relative refs — addressing commits relative to a known point:
+HEAD~1       # one commit back (first parent)
 HEAD~3       # three commits back
 HEAD^        # same as HEAD~1
-HEAD^2       # second parent (merge commits only)
+HEAD^2       # second parent of a merge commit (the merged branch tip)
 main~5       # five back from main tip
+v1.2.0^{}   # the commit a tag points to (dereference a tag)
 
-# Log views
-git log --oneline --decorate --graph --all   # visual DAG
-git log -p --follow src/auth.py              # full diffs + follow renames
-git log -S "authenticate"                    # commits that added/removed this string
-git log -G "regex.*pattern"                  # diff matches regex
-git log --author="Alice" --since="1 week ago"
+# Log views:
+git log --oneline --decorate --graph --all   # visual DAG (alias: lg)
+git log -p --follow -- src/auth.py           # full diffs + follow renames
+git log -S "authenticate"                    # commits that added/removed this string (pickaxe)
+git log -G "regex.*pattern"                  # commits where diff matches regex
+git log --author="Alice" --since="1 week ago" --until="yesterday"
 
-# Inspect
+# Inspect a specific commit:
 git show HEAD
-git show HEAD~2:src/auth.py    # content of file at that commit
+git show HEAD~2:src/auth.py    # content of a file at a specific commit
 
-# Code archaeology
-git blame -w -C src/auth.py                    # who changed each line
-git log -L :authenticate:src/auth.py           # full history of a function
-git log --diff-filter=D -- deleted-file.py     # find when file was deleted
+# Code archaeology:
+git blame -w -C src/auth.py                  # who changed each line
+# -w: ignore whitespace  -C: detect moves within the file
+
+git log -L :authenticate:src/auth.py         # full history of one function
+# Shows every commit that touched this function and the diff for each
+
+git log --diff-filter=D -- deleted-file.py   # find when a file was deleted
+# D=deleted, A=added, M=modified, R=renamed
 \`\`\`
 
-> **Tip:** \`git log -L :functionName:file.py\` (capital L, colon-function-colon-file) shows the complete evolution of a function through all time. Far more useful than blame for understanding WHY code looks the way it does.`,
+### The Most Powerful Archaeology Commands
+
+**\`git log -L :functionName:file.py\`** traces the *evolution of a function* across all time. Instead of showing every file change in a commit, it shows only the lines belonging to that function. Use this to understand why a function looks the way it does — far more useful than blame for complex code.
+
+**\`git log -S "string"\`** (the "pickaxe") finds every commit where this exact string was added or removed. It does not find commits where the string was present but unchanged. Essential for finding when a function was introduced, a constant was defined, or a dependency was first used.
+
+\`\`\`bash
+# Real-world usage: find when a dependency was added
+git log -S "require('vulnerable-package')" --all
+
+# Find when a feature flag was introduced:
+git log -S "FEATURE_AUTH_V2_ENABLED" --all
+\`\`\`
+
+> **Tip:** \`git log -L :functionName:file.py\` (capital L, colon-function-colon-file) shows the complete evolution of a function through all time. Far more useful than blame for understanding WHY code looks the way it does. Combine it with \`git show <sha>\` on interesting commits to read the full context of each change.`,
           interviewQuestions: [
             {
               question: "What is a detached HEAD state? How do you safely work in it and preserve any commits you make?",
@@ -550,88 +790,168 @@ git log -G "regex"               # find commits where diff matches pattern
             "Understand remote-tracking branches and ahead/behind",
             "Design and enforce a branch naming convention",
           ],
-          content: `## What Is a Branch?
+          content: `## What Is a Branch? — The 41-Byte Secret
 
-A branch is a file in \`.git/refs/heads/\` containing a 40-char SHA:
+Most developers think of branches as "copies of the codebase" or "parallel timelines." These mental models break down and cause confusion. The reality is far simpler and more powerful:
+
+**A branch is a text file containing a single 40-character SHA-1 hash.**
 
 \`\`\`bash
 cat .git/refs/heads/main
 # a1b2c3d4e5f6789abcdef0123456789abcdef01
 
-# Creating a branch = writing one 41-byte file
+# The entire file is 41 bytes (40 hex chars + newline)
+wc -c .git/refs/heads/main
+# 41
+
+# Creating a branch writes this same SHA into a new file:
 git branch feature/auth
 cat .git/refs/heads/feature/auth
-# a1b2c3d4...   <- same commit — branches start at the same place
+# a1b2c3d4...   <- identical to main — both point to the same commit
 \`\`\`
 
-**Branch creation is O(1).** No files copied, no history duplicated. SVN branches copy entire directory trees (O(n)). Git's O(1) branching is why short-lived feature branches are the norm.
+This has profound implications:
+
+**Branch creation is O(1) — constant time and constant space.** No matter if your repo has 10 commits or 10 million, creating a branch takes the same time: one file write. SVN branches were directory copies — O(n) proportional to repo size. Mercurial branches embed metadata into commits. Git's approach is uniquely lightweight.
+
+**Branch deletion is also O(1)** — deleting a branch deletes the file. The commits it pointed to are not deleted (they stay in \`.git/objects/\` until garbage collected). This is why \`git branch -D\` feels risky but is recoverable: you only deleted the pointer, not the data.
+
+**Switching branches is a directory update, not a copy.** When you run \`git switch main\`, Git reads the SHA from \`.git/refs/heads/main\`, computes the diff between that tree and your current tree, and applies the diff to your working directory. On a large codebase with thousands of files where you only changed two, only those two files are touched on disk.
+
+---
+
+## Under the Hood: The Ref System
+
+Branches live in \`.git/refs/heads/\`. Remote-tracking branches live in \`.git/refs/remotes/\`. Tags live in \`.git/refs/tags/\`. All are the same format — a file containing a SHA.
+
+For performance with large repos (thousands of branches), Git packs refs:
+
+\`\`\`bash
+# Loose refs (one file each):
+ls .git/refs/heads/
+# main  feature/auth  hotfix/xss
+
+# Packed refs (all in one file after git pack-refs):
+cat .git/packed-refs
+# a1b2c3d4... refs/heads/main
+# d4e5f6... refs/heads/feature/auth
+
+# Git checks packed-refs if the loose ref file doesn't exist.
+# git fetch --prune removes stale remote-tracking refs from packed-refs.
+\`\`\`
 
 ---
 
 ## Branch Operations
 
 \`\`\`bash
-# List
-git branch                  # local
-git branch -r               # remote-tracking
-git branch -vv              # with tracking + ahead/behind
+# List branches:
+git branch                  # local only
+git branch -r               # remote-tracking only
+git branch -a               # all (local + remote-tracking)
+git branch -vv              # local with tracking info + ahead/behind counts
 
-# Create & switch (modern syntax)
-git switch -c feature/login
-git switch main
+# Create & switch (modern, unambiguous syntax):
+git switch -c feature/login             # create and switch immediately
+git switch main                         # switch to existing branch
+git switch -                            # switch to previous branch (like cd -)
 
-# From a specific point
-git switch -c hotfix/bug main
-git switch -c release/v2.4 v2.3.0   # from a tag
+# Create from a specific point:
+git switch -c hotfix/session-bug main         # from main's current HEAD
+git switch -c release/v2.4 v2.3.0            # from a tag
+git switch -c recovery abc123def             # from a specific SHA
 
-# Rename
-git branch -m old-name new-name
+# Rename:
+git branch -m old-name new-name          # rename local branch
+git push origin --delete old-name        # delete old remote name
+git push -u origin new-name              # push new name
 
-# Delete
-git branch -d feature/done          # safe (warns if unmerged)
-git branch -D abandoned-work        # force (data loss risk)
-git push origin --delete old-branch # delete on remote
+# Delete:
+git branch -d feature/done               # safe: refuses if unmerged
+git branch -D abandoned-work             # force delete regardless of merge status
+git push origin --delete old-branch      # delete the branch on the remote
 \`\`\`
+
+### The Difference Between \`git switch\` and \`git checkout\`
+
+\`git checkout\` does two completely unrelated things:
+1. Switch branches: \`git checkout main\`
+2. Restore files: \`git checkout -- src/auth.py\` (discard local changes)
+
+This overloading caused countless "I accidentally discarded my changes" accidents. Git 2.23 introduced dedicated commands:
+
+\`\`\`bash
+git switch main               # replaces: git checkout main
+git switch -c feature/auth    # replaces: git checkout -b feature/auth
+git restore src/auth.py       # replaces: git checkout -- src/auth.py
+\`\`\`
+
+Use \`switch\` and \`restore\`. They are unambiguous and impossible to accidentally confuse.
 
 ---
 
-## Remote-Tracking Branches
+## Remote-Tracking Branches — Local Mirrors of the Remote
 
-Read-only local mirrors of the remote's branches as of last fetch:
+When you \`git fetch\`, Git downloads objects from the remote and updates special read-only refs in \`.git/refs/remotes/\`:
 
 \`\`\`bash
 git branch -r
-# origin/main
+# origin/main          <- remote-tracking: "where main was when I last fetched"
 # origin/feature/auth
+# origin/HEAD -> origin/main
 
 git branch -vv
-# * feature/auth a1b2c3 [origin/feature/auth: ahead 2] Add JWT
+# * feature/auth a1b2c3 [origin/feature/auth: ahead 2, behind 1] Add JWT
 #   main         d4e5f6 [origin/main] Initial commit
-# "ahead 2" = 2 local commits not yet pushed
+# "ahead 2" = 2 local commits not pushed yet
+# "behind 1" = 1 remote commit not pulled yet
+\`\`\`
 
-# Create local branch tracking remote
+**Critical insight:** \`origin/main\` is *not* the same as the remote's \`main\`. It is a snapshot of what the remote's \`main\` was the last time you fetched. It is not automatically updated. Run \`git fetch\` to synchronise it.
+
+\`\`\`bash
+# These are different operations:
+git fetch origin        # update origin/main, DON'T touch local main
+git pull                # fetch + merge (or fetch + rebase with pull.rebase true)
+
+# Check the gap before integrating:
+git fetch origin
+git log --oneline main..origin/main    # what's on remote but not local
+git log --oneline origin/main..main    # what's local but not pushed
+
+# Create local branch from remote-tracking ref:
 git switch -c feature/auth origin/feature/auth
+# --track is implied: the new branch tracks origin/feature/auth
 
-# Fetch + prune dead remote branches
+# Prune stale remote-tracking refs (when remote branches are deleted):
 git fetch --prune
+# or globally:
+git config --global fetch.prune true
 \`\`\`
 
 ---
 
 ## Branch Naming Convention
 
+Branch names are refs stored as files in \`.git/refs/heads/\`. Forward slashes create directory nesting in the refs filesystem. Enforce a naming convention with a pre-push hook or CI rule that rejects non-conforming names:
+
 \`\`\`
-feature/142-oauth-login         <- ticket # + description
+feature/142-oauth-login         <- ticket number + short description
 bugfix/fix-session-expiry
-hotfix/critical-xss-patch
-chore/upgrade-to-node-20
-release/v2.4.0
-experiment/try-redis-caching
+hotfix/critical-xss-patch       <- production emergency
+chore/upgrade-to-node-20        <- maintenance, no user-visible change
+release/v2.4.0                  <- release preparation
+experiment/try-redis-caching    <- exploratory, may be discarded
+docs/update-api-reference
 \`\`\`
 
-Enforce with a pre-push hook or CI rule that rejects non-conforming names. Branch names should communicate who should care, not who wrote it.
+**Why include the ticket number?** It creates a bidirectional link: you can find the branch from the ticket and find the ticket from the branch. Many tools (Jira, Linear, GitHub) automatically detect ticket numbers and create cross-links.
 
-> **Tip:** Use \`git switch\` instead of \`git checkout\` for branches — \`checkout\` is overloaded (it also restores files). \`switch\` is unambiguous. \`git switch -\` goes to the previous branch (like \`cd -\` in shell).`,
+### Common Mistake: Long-Lived Feature Branches
+
+The most common Git pain comes not from command mistakes but from branches that live too long. A branch open for two weeks accumulates commits on \`main\` that touch the same files. When you finally merge, you get "merge conflicts" that are really just "everyone changed the same code independently." The fix is process, not Git knowledge: keep branches under 2-3 days old.
+
+> **Tip:** Use \`git switch\` instead of \`git checkout\` for branches — \`checkout\` is overloaded (it also restores files). \`switch\` is unambiguous. \`git switch -\` goes to the previous branch (like \`cd -\` in shell). And remember: a branch is 41 bytes — create them freely, delete them aggressively.`,
           interviewQuestions: [
             {
               question: "Why is branch creation O(1) in Git? Why does this matter for developer workflow?",
@@ -701,100 +1021,220 @@ git switch -c feature/TICKET-123-add-auth main
             "Resolve merge conflicts systematically with context",
             "Apply squash, --no-ff, and other merge strategies",
           ],
-          content: `## The Three-Way Merge Algorithm
+          content: `## The Three-Way Merge Algorithm — Step by Step
 
-Git uses three snapshots to compute a merge: **ours** (current branch), **theirs** (branch being merged), and the **merge base** (most recent common ancestor):
+When you run \`git merge feature/auth\`, Git does not compare your branch and the feature branch directly. That approach would produce conflicts for every line that differs between them, even if both sides are making compatible changes. Instead Git uses **three-way merge**, which requires a third data point: the merge base.
+
+### What Is the Merge Base?
+
+The merge base is the most recent common ancestor commit — the last commit where both branches were identical:
 
 \`\`\`
-       A (merge base)
+       A (merge base — both branches started here)
       / \\
-     B   C   <- each branch tip
+     B   C   <- work done on main since branching
       \\ /
-       D   <- merge result
+       D   <- the merge result
 \`\`\`
-
-**For each hunk:**
-- Only ours changed from base → take ours
-- Only theirs changed from base → take theirs
-- Both changed identically → take the common result
-- Both changed differently → **CONFLICT** (human resolves)
 
 \`\`\`bash
-# Find the merge base
+# Find the merge base:
 git merge-base main feature/auth
 # a1b2c3...
 
-# See what each side changed relative to the base
+# See what main changed since branching:
 git diff $(git merge-base main feature/auth) main
+
+# See what feature/auth changed since branching:
 git diff $(git merge-base main feature/auth) feature/auth
 \`\`\`
 
+### The Algorithm Applied to Each Hunk
+
+For every changed hunk in the file, Git asks three questions and applies this logic:
+
+| Base says | Ours says | Theirs says | Result |
+|-----------|-----------|-------------|--------|
+| \`timeout = 30\` | \`timeout = 30\` | \`timeout = 60\` | **Take theirs** — only they changed it |
+| \`timeout = 30\` | \`timeout = 10\` | \`timeout = 30\` | **Take ours** — only we changed it |
+| \`timeout = 30\` | \`timeout = 10\` | \`timeout = 60\` | **CONFLICT** — both changed it differently |
+| \`timeout = 30\` | \`timeout = 10\` | \`timeout = 10\` | **Take either** — both made the same change |
+
+The merge base is what makes this possible. Without it, every difference would look like a conflict.
+
+\`\`\`bash
+# Visualise what each side changed before merging:
+git log --oneline main..feature/auth     # commits on feature not in main
+git log --oneline feature/auth..main     # commits on main not in feature
+\`\`\`
+
 ---
 
-## Fast-Forward vs True Merge
+## Fast-Forward vs True Merge — When Each Applies
 
-**Fast-forward** (branch hasn't diverged):
-\`\`\`
-Before:  main: A-B   feature: A-B-C-D
-After:   main: A-B-C-D  (pointer moved, no merge commit)
-\`\`\`
+### Fast-Forward Merge
 
-**True merge** (branches diverged):
+When the current branch is a direct ancestor of the branch being merged (no divergence), Git can simply advance the pointer — no merge commit needed:
+
 \`\`\`
-Before:  main: A-B-E   feature: A-B-C-D
-After:   main: A-B-E-M  (M has two parents: E and D)
+Before:  main: A─B       feature: A─B─C─D
+         (main is an ancestor of feature)
+
+After:   main: A─B─C─D   (pointer moved forward — no merge commit)
 \`\`\`
 
 \`\`\`bash
-git merge feature/auth              # fast-forward if possible
-git merge --no-ff feature/auth      # always create merge commit
-git merge --ff-only feature/auth    # fail if not fast-forwardable
-git merge --squash feature/auth     # collapse to one staged change
+git merge feature/auth              # fast-forward if possible (default)
+git merge --ff-only feature/auth    # fail if fast-forward not possible
+# Use --ff-only in automated pipelines to enforce rebased branches
+\`\`\`
+
+### True (Three-Way) Merge
+
+When both branches have diverged (both have commits the other lacks), a merge commit is required:
+
+\`\`\`
+Before:  main: A─B─E     feature: A─B─C─D
+         (both have diverged from B)
+
+After:   main: A─B─E─M   (M has two parents: E and D)
+\`\`\`
+
+The merge commit M records that at this point in history, two development lines were reconciled. You can \`git log --graph\` and see the branch topology.
+
+### Merge Strategies Compared
+
+\`\`\`bash
+git merge feature/auth              # fast-forward if possible, else true merge
+git merge --no-ff feature/auth      # always create a merge commit
+# --no-ff preserves the fact that a feature branch was used
+# Useful when you want git log to show feature branches as branches
+
+git merge --squash feature/auth     # collapse all feature commits into one staged diff
+# Then: git commit -m "feat: add OAuth2"
+# History: feature branch history NOT preserved in main
+# Use case: messy WIP history on feature, want one clean commit on main
+
+git merge --strategy-option=ours main
+# In conflict, always take our version
+# Useful for maintenance branches where you want to mark commits as merged
+# without actually integrating changes
 \`\`\`
 
 ---
 
-## Resolving Conflicts
+## What a Merge Conflict Actually Is at the File Level
+
+A conflict marker is not an error — it is Git telling you "I found a hunk where both sides made incompatible changes and I need you to decide the right outcome."
 
 \`\`\`bash
 git merge feature/auth
 # CONFLICT (content): Merge conflict in src/auth.py
+# Automatic merge failed; fix conflicts and then commit the result.
 
-# Conflicted file contains markers:
+# The conflicted file now contains markers:
 <<<<<<< HEAD
 def authenticate(user, password):
     return bcrypt.check(password, user.hash)
+||||||| merged common ancestors      # the BASE version (with mergetool)
+def authenticate(user, password):
+    return db.verify(password, user.id)
 =======
 def authenticate(user, token):
     return jwt.verify(token, SECRET)
 >>>>>>> feature/auth
+\`\`\`
 
-# Resolution process:
-# 1. Read git log to understand INTENT of each change
-# 2. Edit file to the correct combined result (delete ALL markers)
-# 3. git add src/auth.py
-# 4. git commit
+Three zones:
+- \`<<<<<<< HEAD\` to \`|||||||\` — **your version** (current branch)
+- \`|||||||\` to \`=======\` — **base version** (what it was before both changed it)
+- \`=======\` to \`>>>>>>>\` — **their version** (the branch being merged)
 
-git merge --abort   # bail out entirely, return to pre-merge state
+The base section only appears with \`merge.conflictstyle=diff3\` (recommended — configure it globally):
 
-# Or use a visual tool:
+\`\`\`bash
+git config --global merge.conflictstyle diff3
+# Now you see all three versions in every conflict → much easier to understand
+\`\`\`
+
+### Resolving Conflicts Systematically
+
+\`\`\`bash
+# Step 1: Understand the intent of each side
+git log --oneline main..feature/auth              # what feature was building
+git log --oneline feature/auth..main              # what main received since branching
+
+# Step 2: Check what the base version was
+git show $(git merge-base main feature/auth):src/auth.py
+
+# Step 3: Edit the file — remove ALL markers, produce the correct combined result
+# Never blindly pick one side — understand what both were trying to do
+
+# Step 4: Verify your resolution
+# Run tests! A syntactically correct file can be semantically broken.
+
+# Step 5: Stage and commit
+git add src/auth.py
+git merge --continue    # or git commit
+
+# Bail out entirely (restores to pre-merge state):
+git merge --abort
+\`\`\`
+
+### Using a Three-Pane Merge Tool
+
+\`\`\`bash
 git config --global merge.tool vscode
-git mergetool   # shows base | ours | theirs | result panes
+git config --global mergetool.vscode.cmd 'code --wait $MERGED'
+
+git mergetool   # opens VS Code's three-pane diff editor
+# Left pane: ours  |  Middle: result  |  Right: theirs
+
+# Other options:
+# vimdiff, intellij, meld, p4merge
 \`\`\`
 
 ---
 
-## ORIG_HEAD Safety Net
+## ORIG_HEAD and MERGE_HEAD — Safety Nets
 
-Git saves HEAD before every merge/rebase/reset to ORIG_HEAD:
+Before every merge, Git saves the current HEAD to \`ORIG_HEAD\`. Before every rebase, it saves to \`ORIG_HEAD\` too. This is your automatic backup:
 
 \`\`\`bash
 git merge feature/auth
-# Something went wrong:
-git reset --hard ORIG_HEAD   # undo the entire merge
+# Merge result looks wrong:
+git reset --hard ORIG_HEAD    # undo the entire merge instantly
+
+# MERGE_HEAD exists during a merge-in-progress:
+cat .git/MERGE_HEAD           # SHA of the branch being merged
+cat .git/MERGE_MSG            # pre-filled merge commit message
+
+# These files are cleaned up when the merge is completed or aborted.
 \`\`\`
 
-> **Tip:** Before resolving a complex conflict, run \`git log --oneline main..feature/auth\` to understand what the feature was trying to accomplish. Mechanical conflict resolution (blindly picking one side) often introduces logic bugs worse than the original conflict.`,
+---
+
+## Production Pattern: Merge vs Squash vs Rebase
+
+\`\`\`
+Strategy        History           Bisect    Revert      When to use
+─────────────────────────────────────────────────────────────────────
+--no-ff merge   Branch visible    Good      Easy (whole Visible feature history matters
+                                            feature)
+
+--squash merge  Linear, clean     Great     Easy (one   WIP commits, clean main history
+                                  commit)
+
+Rebase + merge  Linear, no MC     Great     Commit by   Perfect commit hygiene required
+                                  commit
+
+Fast-forward    Linear            Great     Commit by   Simple, no divergence
+                                  commit
+\`\`\`
+
+Teams should pick **one strategy** and enforce it consistently via GitHub merge settings (allow only squash merges, or only merge commits). Inconsistency produces a log that is impossible to read.
+
+> **Tip:** Before resolving a complex conflict, run \`git log --oneline main..feature/auth\` to understand what the feature was trying to accomplish. Mechanical conflict resolution (blindly picking one side) often introduces logic bugs worse than the original conflict. Also enable \`merge.conflictstyle=diff3\` globally — seeing the base version in every conflict makes resolution dramatically easier.`,
           interviewQuestions: [
             {
               question: "Explain the three-way merge algorithm. Why does Git need the merge base?",
@@ -888,45 +1328,83 @@ git commit
             "State and apply the golden rule of rebasing",
             "Choose between rebase and merge for different scenarios",
           ],
-          content: `## How Rebase Works Internally
+          content: `## How Rebase Works Internally — New Commits, Not Moved Ones
 
-Rebase **replays** commits as new commits on a new base. It does NOT move commits:
+The word "rebase" is slightly misleading. Rebase does not *move* commits from one branch to another. It **re-applies** the work those commits represent, creating entirely new commit objects on the new base:
 
 \`\`\`
-Before:  main: A-B-C
-         feature:     D-E-F
+Before:  main:    A─B─C
+         feature: A─B─D─E─F   (branched off at B)
 
-git rebase main (from feature branch)
+git rebase main   (run from feature branch)
 
-After:   main: A-B-C
-         feature:     D'-E'-F'
+After:   main:    A─B─C              (unchanged)
+         feature: A─B─C─D'─E'─F'   (D', E', F' are new commits)
 \`\`\`
 
-D', E', F' are NEW commit objects with new SHAs. The original D, E, F are orphaned (reflog holds them 30 days).
+D', E', F' are **new commit objects** with new SHAs. They contain the same changes as D, E, F but have \`C\` as their ancestor instead of \`B\`. The original D, E, F are orphaned — no branch points to them, but the reflog holds them for 30 days.
 
-**Step-by-step algorithm:**
-1. Find merge base of feature and main (common ancestor)
-2. Save the diff of each commit from the merge base forward
-3. Checkout main's tip (C)
-4. Apply each saved diff as a new commit
-5. If conflict → pause, you resolve, \`git rebase --continue\`
-6. Move feature branch pointer to the new tip
+### Step-by-Step Algorithm
+
+\`\`\`bash
+# When you run: git rebase main (from feature branch)
+
+# 1. Find the merge base:
+MERGE_BASE=$(git merge-base main feature)
+# = B in our diagram
+
+# 2. Save the diff for each commit since the merge base:
+# D's patch = "add authentication module"
+# E's patch = "add OAuth provider"
+# F's patch = "add tests"
+
+# 3. Reset the feature branch pointer to main's tip (C):
+# HEAD is now at C
+
+# 4. Apply each saved patch as a new commit:
+# Apply D's patch → new commit D' (parent: C, same changes as D)
+# Apply E's patch → new commit E' (parent: D', same changes as E)
+# Apply F's patch → new commit F' (parent: E', same changes as F)
+
+# 5. If any patch fails to apply cleanly → conflict:
+# Git pauses, you resolve, then:
+git rebase --continue
+
+# Or bail out entirely:
+git rebase --abort    # restores feature to its original state
+
+# 6. Move the feature branch pointer to F'
+\`\`\`
+
+### Why Rebase Produces New SHAs Every Time
+
+A commit's SHA is computed from its content: tree + parent + author + message. When you rebase, the **parent** changes (C instead of B). Therefore D', E', F' always have different SHAs than D, E, F — even if the changes are identical. This is not a bug; it is the content-addressable model working correctly.
 
 ---
 
-## Interactive Rebase
+## Interactive Rebase — Rewriting History Before Review
+
+Interactive rebase (\`-i\`) opens your editor with a todo list of commits. You change the action next to each commit and Git executes your instructions in order:
 
 \`\`\`bash
 git rebase -i HEAD~5
-# Editor opens:
+# Or rebase on the remote branch to clean up everything not yet pushed:
+git rebase -i origin/main
+\`\`\`
 
+The editor opens:
+
+\`\`\`
 pick a1b2c3 Fix login bug
 pick d4e5f6 WIP: start oauth
 pick 7g8h9i WIP: oauth almost done
 pick 1j2k3l Fix typo
 pick 3m4n5o Add oauth tests
+\`\`\`
 
-# Clean up to:
+Edit to:
+
+\`\`\`
 pick   a1b2c3 Fix login bug
 reword d4e5f6 feat: add OAuth2 (Google + GitHub)
 squash 7g8h9i WIP: oauth almost done
@@ -934,62 +1412,129 @@ fixup  1j2k3l Fix typo
 pick   3m4n5o test: add OAuth2 integration tests
 \`\`\`
 
-**Commands:**
-- \`pick\` — use unchanged
-- \`reword\` — edit the message (pauses editor)
-- \`edit\` — pause to amend, add files, or split
-- \`squash\` — combine with previous, merge messages
-- \`fixup\` — combine with previous, discard message
-- \`drop\` — delete entirely (dangerous if later commits depend on it)
-- Reorder lines to reorder commits
+### Command Reference
+
+| Command | What it does |
+|---------|-------------|
+| \`pick\` | Use the commit unchanged |
+| \`reword\` | Edit the commit message — pauses the editor |
+| \`edit\` | Pause after this commit so you can amend or split it |
+| \`squash\` | Combine with the previous commit, opening editor to merge messages |
+| \`fixup\` | Combine with the previous commit, **discarding this commit's message** |
+| \`drop\` | Delete this commit entirely — **dangerous** if later commits depend on it |
+| (reorder lines) | Reorder lines to reorder commits in history |
+
+### Common Mistake: squash vs fixup
+
+\`squash\` opens the editor showing both commit messages combined — you write a new message that incorporates both. \`fixup\` silently discards the second message. Use \`fixup\` for cleanup commits ("fix typo", "fmt", "oops") and \`squash\` when both messages contain useful information worth merging.
 
 ---
 
-## Splitting a Commit
+## Splitting a Commit with \`edit\`
+
+Sometimes a commit contains two unrelated changes that should be separate commits. Use \`edit\` to pause and split it:
 
 \`\`\`bash
 git rebase -i HEAD~3
-# Mark target commit as "edit"
+# Mark target commit as "edit" in the editor
 
-# Git pauses at that commit
-git reset HEAD~1             # uncommit, keep as staged
-git add -p                   # stage only part 1
-git commit -m "Part 1: add login form"
-git add -p                   # stage part 2
-git commit -m "Part 2: add form validation"
-git rebase --continue
+# Git applies the commit and pauses:
+git reset HEAD~1             # uncommit but keep changes as unstaged
+git add -p                   # interactively stage only the first logical chunk
+git commit -m "feat: add login form validation"
+git add -p                   # stage the remaining changes
+git commit -m "feat: add login form HTML structure"
+git rebase --continue        # continue replaying remaining commits
 \`\`\`
 
 ---
 
-## The Golden Rule of Rebasing
+## The Golden Rule of Rebasing — When NOT to Rebase
 
-> **Never rebase commits that have been pushed to a shared branch that others have pulled from.**
+> **Never rebase commits that have been pushed to a branch other people have already pulled from.**
 
-Rebase creates new SHAs. If others pulled the old SHAs, their next pull sees both the old AND new history — orphaned duplicates, confusing divergence, broken \`git log --graph\`.
+Rebase creates new SHAs. If others have already cloned or pulled the old SHAs, they now have commits that no longer exist on the remote. When they try to push or pull, Git sees two unrelated histories:
+
+\`\`\`
+Situation after force-push following a rebase:
+Remote:         A─B─C─D'─E'─F'   (new history)
+Developer Alice: A─B─C─D─E─F     (old history she pulled yesterday)
+
+Alice's git pull:
+Merges the two histories into: A─B─C─D─E─F─D'─E'─F'─M (duplicate commits!)
+\`\`\`
+
+Alice now has a fork containing both the old and new versions of each commit. Her \`git log --graph\` looks like a nightmare.
 
 \`\`\`bash
-# SAFE: your own feature branch
-git rebase main
-git push --force-with-lease   # ok, only you use this branch
+# SAFE: rebase your own feature branch (only you use it)
+git rebase origin/main         # update feature branch
+git push --force-with-lease    # safe force push: fails if someone else pushed
 
-# DANGEROUS: public shared branch
-git rebase -i main            # rewrites public history
-git push --force              # BREAKS all teammates
+# DANGEROUS: rebasing any branch others are working on
+git rebase -i main             # on a shared branch
+git push --force               # BREAKS everyone who pulled this branch
+
+# --force-with-lease vs --force:
+# --force: overwrites remote regardless (dangerous)
+# --force-with-lease: checks that the remote ref hasn't changed since your last fetch
+# If someone pushed after you fetched, --force-with-lease refuses (you must pull first)
 \`\`\`
 
 ---
 
-## Rebase vs Merge Guide
+## \`--autosquash\` — Preparing fixup Commits in Advance
 
-| Scenario | Recommendation |
-|---|---|
-| Update feature from main | Rebase (keeps linear history) |
-| Long-lived shared branches | Merge (safe) |
-| Before PR review (cleanup) | Rebase + squash |
-| After PR reviewed | Don't rebase (reviewers checked specific SHAs) |
+When you make a small fix to a previous commit, use \`--fixup\` to create a commit that will be automatically squashed:
 
-> **Tip:** \`git rebase --autostash --autosquash origin/main\` — automatically stashes uncommitted changes, rebases, applies autosquash fixup commits in order, then restores stash. One command to clean up and rebase.`,
+\`\`\`bash
+# You made a typo in commit abc123:
+git add src/auth.py
+git commit --fixup abc123    # creates "fixup! <original message>"
+
+# When you rebase:
+git rebase -i --autosquash origin/main
+# Git automatically places the fixup commit after abc123 and marks it as fixup
+# No manual editor work needed — the todo list is pre-arranged
+\`\`\`
+
+---
+
+## Rebase vs Merge — Decision Guide
+
+| Scenario | Recommendation | Why |
+|---|---|---|
+| Update feature from main | **Rebase** | Keeps history linear, no merge commit noise |
+| Integrating to a shared long-lived branch | **Merge** | Safe, preserves history |
+| Cleaning up before PR review | **Rebase + squash** | Reviewers see clean, logical commits |
+| After PR is reviewed and SHAs are recorded | **Do NOT rebase** | Reviewers' SHA references would break |
+| Merging to main from a short-lived PR | **Squash merge** | One clean commit per feature on main |
+| Hotfix to prod with clear attribution needed | **--no-ff merge** | Branch structure visible in log |
+
+---
+
+## Under the Hood: What Makes a Conflict During Rebase
+
+When a patch from commit D cannot apply cleanly to the new base C, rebase pauses. This is the same three-way merge algorithm as \`git merge\`, applied per-commit:
+
+\`\`\`bash
+# Rebase conflicts look identical to merge conflicts:
+git rebase origin/main
+# CONFLICT (content): Merge conflict in src/auth.py
+# error: could not apply d4e5f6... feat: add OAuth2
+
+# Fix the conflict:
+# Edit src/auth.py to resolve the conflict markers
+git add src/auth.py
+git rebase --continue    # apply the next patch
+
+# Check where you are in the rebase:
+cat .git/rebase-merge/msgnum     # current commit number (e.g., "2")
+cat .git/rebase-merge/end        # total commits to replay (e.g., "5")
+ls .git/rebase-merge/            # all state for the in-progress rebase
+\`\`\`
+
+> **Tip:** \`git rebase --autostash --autosquash origin/main\` — automatically stashes uncommitted changes before rebasing, applies autosquash fixup commits in order, then restores the stash. One command to clean up and rebase in one shot. Configure \`rebase.autostash=true\` and \`rebase.autosquash=true\` globally to always get this behaviour.`,
           interviewQuestions: [
             {
               question: "What is the golden rule of rebasing? What happens if you break it?",
@@ -1058,107 +1603,262 @@ git rebase origin/main         # now only 1 patch to apply
             "Distinguish revert from reset for shared branches",
             "Use git stash for quick context switches",
           ],
-          content: `## Undo Decision Framework
+          content: `## Undo Decision Framework — Choosing the Right Tool
+
+Git has many undo mechanisms and each is appropriate for a specific situation. Using the wrong one either does nothing (frustrating) or causes data loss (catastrophic). Use this decision tree first:
 
 \`\`\`
-Has the commit been pushed to a shared branch?
-├── NO  -> git reset (rewrite local history freely)
-└── YES -> git revert (add an inverse commit — safe)
-
-Is the mistake in uncommitted changes?
-├── Staged  -> git restore --staged <file>
-└── Unstaged -> git restore <file>  [DESTRUCTIVE — no recovery!]
+What are you undoing?
+│
+├── Uncommitted changes (not yet committed):
+│   ├── Staged files:   git restore --staged <file>   (unstage, keep changes)
+│   └── Working dir:    git restore <file>             [DESTRUCTIVE — truly unrecoverable!]
+│
+├── Committed changes — has the commit been pushed?
+│   ├── NOT pushed (local only):
+│   │   └── git reset --soft/--mixed/--hard HEAD~N    (rewrite history freely)
+│   │
+│   └── PUSHED to a shared branch:
+│       └── git revert <sha>                           (add an inverse commit — safe)
+│
+└── Need to undo a Git operation (bad rebase, bad merge):
+    └── git reset --hard ORIG_HEAD  or  git reflog + reset
 \`\`\`
 
 ---
 
-## git reset — Three Modes
+## Git's Three Trees — The Mental Model Behind Reset
+
+To understand \`reset\`, you need to understand Git's three trees:
+
+1. **Repository** (\`.git/objects/\` — the commit history): where objects are stored permanently
+2. **Index** (\`.git/index\` — the staging area): what will go into the next commit
+3. **Working tree** (your files on disk): what you see and edit
+
+Every \`git reset\` command moves the branch pointer (and HEAD) backward in the commit graph. The three modes differ in how far the change propagates into the Index and Working tree:
+
+\`\`\`
+         HEAD pointer    Index       Working tree
+reset --soft:   ✓ moves        unchanged   unchanged
+reset --mixed:  ✓ moves        ✓ updates   unchanged
+reset --hard:   ✓ moves        ✓ updates   ✓ updates
+\`\`\`
 
 \`\`\`bash
-# --soft: move HEAD only. Index and working dir unchanged.
+# --soft: move HEAD only. Changes stay staged.
 git reset --soft HEAD~1
-# When: "I committed too early, want to add more to this commit"
-# Effect: changes stay staged, ready to commit again
+# Result: last commit is gone, but all its changes are in the Index (staged)
+# When to use: "I committed too early — want to add more files to this commit"
+# After this: add more files, then 'git commit' recreates the commit with everything
 
-# --mixed (default): move HEAD + reset index. Working dir unchanged.
+# --mixed (default): move HEAD + reset Index. Working tree unchanged.
 git reset HEAD~1
-# When: "Uncommit and unstage — I'll re-stage selectively"
-# Effect: changes appear as unstaged modifications
+# Result: last commit is gone, changes are in working tree (unstaged)
+# When to use: "I committed things that shouldn't be together — re-stage selectively"
+# After this: use 'git add -p' to stage only what belongs in each commit
 
-# --hard: move HEAD + reset index + reset working dir
+# --hard: move HEAD + reset Index + reset working tree.
 git reset --hard HEAD~1
-# When: "Throw away the last commit AND its changes completely"
-# WARNING: working dir changes are gone (but reflog saves past commits)
+# Result: last commit is gone, ALL its changes are gone from working tree
+# When to use: "This experiment failed completely — throw everything away"
+# WARNING: changes NOT in a prior commit are GONE FOREVER (no recovery via reflog!)
 \`\`\`
+
+### The Key Safety Distinction
+
+\`git reset --hard\` is safe for **committed** work (reflog has it) but **permanently destroys uncommitted working tree changes**. There is no reflog for unstaged changes. Always commit or stash before running \`--hard\`.
 
 ---
 
-## git revert — Safe Undo for Shared History
+## \`git restore\` — The Modern Way to Undo File Changes
 
 \`\`\`bash
-git revert HEAD              # undo last commit
-git revert a1b2c3d4          # undo a specific commit
-git revert HEAD~3..HEAD      # undo last 3 commits (3 revert commits)
-git revert -n a1b2c3d4       # stage revert without committing
+# Unstage a file (move from Index back to working tree):
+git restore --staged src/auth.py
+# Equivalent to the old: git reset HEAD src/auth.py
 
-# Reverting a merge commit (specify which parent to keep)
-git revert -m 1 <merge-sha>  # -m 1 = keep main parent, undo merged branch
+# Discard working tree changes (DESTRUCTIVE — no recovery):
+git restore src/auth.py
+# Equivalent to the old: git checkout -- src/auth.py
+
+# Restore a file to what it looked like in a specific commit:
+git restore --source HEAD~3 src/auth.py
+# The file in your working tree is now what it was 3 commits ago
+
+# Restore multiple files matching a pattern:
+git restore --staged '*.py'
 \`\`\`
-
-**The rule:** reset for local/unpushed, revert for shared branches.
 
 ---
 
-## The Reflog — 30-Day Safety Net
+## \`git revert\` — Safe Undo for Shared History
+
+\`git revert\` does not remove a commit. It **adds a new commit** that applies the exact inverse of the target commit's changes. The original commit remains in history forever:
+
+\`\`\`bash
+# Revert the most recent commit:
+git revert HEAD
+# Git computes the inverse diff and creates a new commit
+
+# Revert a specific older commit:
+git revert a1b2c3d4
+# Note: this applies the inverse of ONLY that commit, not everything after it
+
+# Revert a range (creates one revert commit per reverted commit):
+git revert HEAD~3..HEAD
+
+# Revert but don't commit yet (stage the revert for inspection):
+git revert -n a1b2c3d4
+git status           # see the reverted changes staged
+git diff --staged    # review before committing
+
+# Reverting a merge commit (you must specify which parent to keep):
+git revert -m 1 <merge-sha>
+# -m 1 = keep first parent (the main branch), revert the merged changes
+# -m 2 = keep second parent (would revert what was on main)
+\`\`\`
+
+### Why Revert Exists (Not Just Reset)
+
+Once a commit is pushed to a shared branch, everyone who pulled has that commit's SHA in their local history. If you \`reset\` the shared branch and force-push, their local history diverges and they get a confusing "diverged branches" error on next pull. \`git revert\` adds new history instead of rewriting old history — all developers can simply \`git pull\` and get the fix.
+
+---
+
+## The Reflog — Git's 30-Day Undo Journal
+
+The reflog (\`.git/logs/HEAD\`) records every single position HEAD has occupied. Every commit, checkout, merge, rebase, reset, and branch switch gets logged:
 
 \`\`\`bash
 git reflog
-# a1b2c3 HEAD@{0}: commit: Add OAuth
-# d4e5f6 HEAD@{1}: rebase (finish)
-# 7g8h9i HEAD@{2}: reset: moving to HEAD~1
+# a1b2c3 HEAD@{0}: commit: Add OAuth2 login
+# d4e5f6 HEAD@{1}: rebase (finish): returning to refs/heads/feature/auth
+# 7g8h9i HEAD@{2}: rebase (pick): Add OAuth2 login
+# 9f8e7d HEAD@{3}: rebase (start): checkout origin/main
+# 2c3d4e HEAD@{4}: reset: moving to HEAD~3   ← aha, this is where things went wrong
+# 5b6c7d HEAD@{5}: commit: Add user model
+# ...
 
-# Recover from any local disaster:
-git reset --hard HEAD@{2}         # go back to any reflog position
-git checkout -b rescue HEAD@{5}   # branch off any past position
+# Go back to any point in reflog history:
+git reset --hard HEAD@{4}    # go back to before the reset
+git reset --hard HEAD@{5}    # go back to the commit before the reset
+
+# Create a branch from any reflog entry (non-destructive):
+git switch -c rescue HEAD@{5}
 \`\`\`
 
-Reflog retains entries for 30 days (\`gc.reflogExpire\`). This window lets you recover from accidental \`reset --hard\`, deleted branches, bad rebases — any local disaster.
+The reflog is **local only** — it is not pushed to the remote. It records 30 days of HEAD positions (configurable via \`gc.reflogExpire\`). This 30-day window means you can recover from virtually any local disaster.
+
+### Reflog for Specific Refs
+
+\`\`\`bash
+# Reflog for a specific branch (even deleted ones for 30 days):
+git reflog show feature/deleted-branch
+
+# Reflog in time-based format:
+git reflog --format='%h %gd %gs %s'
+
+# Show reflog with date:
+git reflog --date=iso
+\`\`\`
 
 ---
 
-## git stash
+## \`git stash\` — Temporary Shelving
+
+Stash saves your uncommitted work (staged + unstaged) onto a stack so you can switch context without committing work-in-progress:
 
 \`\`\`bash
-git stash push -m "WIP: auth middleware"
+# Save current work with a description:
+git stash push -m "WIP: auth middleware — need to hotfix prod first"
+
+# List stashes (they persist across branch switches):
 git stash list
-git stash pop                    # apply + remove from list
-git stash apply stash@{0}        # apply + keep in list
-git stash -u                     # include untracked files
-git stash push -p                # interactive partial stash
-git stash branch new-branch      # create branch from stash context
+# stash@{0}: On feature/auth: WIP: auth middleware
+# stash@{1}: On main: WIP: refactor database layer
+
+# Apply and remove from stack (most common):
+git stash pop                    # applies stash@{0} and removes it
+
+# Apply but keep in stack (to apply to multiple branches):
+git stash apply stash@{1}
+
+# Include untracked files in the stash:
+git stash push -u -m "WIP including new files"
+
+# Partial stash — interactively pick which changes to stash:
+git stash push -p
+
+# Create a branch from a stash (useful when the stash no longer applies cleanly):
+git stash branch new-branch stash@{0}
+# Creates new-branch at the commit where the stash was created, then applies it
+
+# Drop a stash without applying:
+git stash drop stash@{1}
+
+# Clear ALL stashes (DESTRUCTIVE):
+git stash clear
+\`\`\`
+
+### When Stash vs Commit
+
+Stash is for **minutes to hours** of context-switch. For anything longer, commit. A stash that sits for days is a liability: it may conflict badly when applied. A commit on a branch is safer and easier to recover.
+
+---
+
+## Disaster Recovery Playbook
+
+\`\`\`bash
+# Scenario: "git reset --hard lost my work"
+# Your changes were committed (even if just to a temp commit):
+git reflog                         # find the SHA just before the reset
+git reset --hard HEAD@{N}          # restore to that point
+
+# Scenario: "I accidentally deleted a branch"
+git reflog show feature/deleted    # shows recent commits on that branch
+git switch -c recovered-branch <SHA>
+
+# Scenario: "Bad merge — want to undo the whole merge"
+git reset --hard ORIG_HEAD         # Git saves pre-merge state to ORIG_HEAD
+# or:
+git revert -m 1 <merge-commit-sha> # safe if already pushed
+
+# Scenario: "Bad rebase — everything is a mess"
+git reflog                          # find HEAD state before the rebase
+# Look for: "rebase (start): checkout origin/main" entry
+git reset --hard HEAD@{N}           # go to the commit just before that entry
+
+# Scenario: "Orphaned commits I can't find"
+git fsck --lost-found               # finds ALL unreachable objects
+ls .git/lost-found/commit/          # orphaned commits listed here
+git show <sha>                      # inspect each one
+
+# Scenario: "Force push deleted commits on the remote"
+# Check if any teammate still has the old commits locally
+# If yes: they can push the old history back (coordinate with them)
+# If no: the commits may be gone — only GitHub Support can recover from snapshots
 \`\`\`
 
 ---
 
-## Disaster Recovery Scenarios
+## Under the Hood: Why ORIG_HEAD and MERGE_HEAD Exist
+
+Git stores context for in-progress and just-completed operations:
 
 \`\`\`bash
-# "git reset --hard lost my work"
-git reflog
-git reset --hard HEAD@{1}     # go back to before the reset
+# ORIG_HEAD: HEAD before the last merge/rebase/reset
+cat .git/ORIG_HEAD    # the SHA you came from
 
-# "I deleted a branch with commits"
-git reflog | grep "feature/deleted"
-git branch rescue <SHA>
+# MERGE_HEAD: the branch being merged (only during a merge)
+cat .git/MERGE_HEAD   # SHA of the incoming branch
 
-# "Bad merge"
-git reset --hard ORIG_HEAD    # ORIG_HEAD saved before merge/rebase
+# CHERRY_PICK_HEAD: the commit being cherry-picked
+cat .git/CHERRY_PICK_HEAD
 
-# "Orphaned commits after rebase"
-git fsck --lost-found         # finds ALL unreachable objects
+# These are cleaned up when the operation completes or is aborted.
+# They're why "git reset --hard ORIG_HEAD" always undoes the last big operation.
 \`\`\`
 
-> **Tip:** Before any risky operation, run \`git branch backup\` to create a branch at current HEAD. If anything goes wrong, that branch still points to where you were. It costs nothing (41 bytes) and has saved many developers.`,
+> **Tip:** Before any risky operation (rebase, merge, filter-repo), run \`git branch backup-$(date +%Y%m%d)\` to create a branch at current HEAD. If anything goes wrong, that branch still points to where you were. It costs nothing (41 bytes) and has saved many developers. Delete it once the operation succeeds.`,
           interviewQuestions: [
             {
               question: "Explain `git reset --soft`, `--mixed`, and `--hard` with a concrete example of when you'd use each.",

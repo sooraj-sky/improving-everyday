@@ -35,161 +35,439 @@ export const scriptingTrack: Track = {
           tags: ["grep", "sed", "awk", "sort", "uniq", "cut", "tr", "wc", "regex", "pipeline"],
           content: `## Text Processing on the Command Line
 
-Unix was built around the philosophy that programs should do one thing well and compose via pipes. The tools in this lesson embody that philosophy — master them and you can process almost any text without writing a full script.
+Unix was designed around a powerful philosophy: every program should do one thing well, read from standard input, and write to standard output. This means programs can be chained together using pipes (\`|\`), creating processing pipelines that rival dedicated scripts. The tools in this lesson — grep, sed, awk, sort, uniq, cut, tr, and wc — embody that philosophy. They were created at Bell Labs in the 1970s and remain the backbone of production log analysis, config transformation, and data extraction in modern DevOps.
+
+The key mental model: text flows left to right through a pipeline. Each tool reads stdin, transforms it, and writes to stdout. No tool knows or cares what comes before or after it. This composability is why a 5-tool pipeline can replace hundreds of lines of Python.
 
 ---
 
 ## grep — Searching Text
 
-\`grep\` prints every line that matches a pattern.
+\`grep\` (Global Regular Expression Print) reads lines from files or stdin and prints only those that match a pattern. The name comes from the ed editor command \`g/re/p\` — globally print lines matching a regular expression.
+
+### How It Works
+
+grep reads input line by line, evaluates the regex against each line, and outputs matching lines. It never modifies input — it only filters. The exit code is 0 if at least one match was found, 1 if none, 2 on error — this makes it composable with conditionals.
 
 \`\`\`bash
-# Basic match
+# Basic match — print every line containing "ERROR"
 grep "ERROR" app.log
 
-# Case-insensitive
+# Case-insensitive (-i): matches ERROR, error, Error, eRrOr
 grep -i "error" app.log
 
-# Invert match (lines that do NOT match)
+# Invert match (-v): lines that do NOT match (v = "inverse")
+# Useful for filtering out noise like DEBUG and INFO lines
 grep -v "DEBUG" app.log
 
-# Recursive search through a directory tree
+# Recursive search (-r): walk directory trees
+# Essential for project-wide searches across many files
 grep -r "TODO" ./src/
 
-# Print only filenames that contain a match
+# List only filenames (-l = "list"), not matching lines
+# Useful when you just need to know WHICH files contain a pattern
 grep -rl "password" ./config/
 
-# Count matching lines per file
+# Count matching lines per file (-c = "count")
+# Does not print lines, only the count per file
 grep -rc "WARN" ./logs/
 
-# Show 3 lines of context around each match
-grep -C 3 "segfault" /var/log/syslog
+# Context lines: show N lines before (-B), after (-A), or around (-C) each match
+# Invaluable for understanding what happened before a crash
+grep -C 3 "segfault" /var/log/syslog     # 3 lines before AND after
+grep -A 5 "OOM killer" /var/log/syslog   # 5 lines after the match
+grep -B 2 "connection refused" app.log   # 2 lines before
+
+# Whole word match (-w): "log" won't match "logging" or "catalog"
+grep -w "log" app.log
+
+# Print only the matching part (-o), not the whole line
+# Combined with -P (Perl regex), extremely powerful for extraction
+grep -oP "user_id=\K[0-9]+" auth.log   # \K resets the match start
+
+# Show line numbers (-n): critical for debugging config files
+grep -n "server_name" /etc/nginx/nginx.conf
+
+# Suppress errors about unreadable files (-s = "silent")
+grep -rs "pattern" /proc/ 2>/dev/null
 \`\`\`
 
 ### Extended and Perl-Compatible Regex
 
+grep supports three regex flavors with different capabilities:
+
+- **Basic regex (BRE)** — default, older syntax, some operators like \`+\` need escaping
+- **Extended regex (ERE)** — \`-E\` flag, enables \`+\`, \`?\`, \`|\`, \`()\` without backslashes
+- **Perl-compatible regex (PCRE)** — \`-P\` flag, enables lookaheads, lookbehinds, non-greedy matching, named groups, and the \`\K\` reset
+
 \`\`\`bash
-# -E enables extended regex (alternation, +, ?)
+# -E enables extended regex — use | for alternation, + for one-or-more
 grep -E "ERROR|FATAL|CRITICAL" app.log
 
-# Match lines starting with an IP address
+# Match an IPv4 address at the start of each line
+# {n} repetition requires -E
 grep -E "^[0-9]{1,3}(\.[0-9]{1,3}){3}" access.log
 
-# -P enables Perl-compatible regex (lookaheads, named groups)
+# -P enables Perl-compatible regex
+# Positive lookbehind: match only the word after "user="
 grep -P "(?<=user=)\w+" auth.log
 
-# Extract only the matched part (not the whole line)
+# \K resets the start of the match (more powerful than lookbehind)
+# Extract only the number from "duration=142ms" lines
 grep -oP "duration=\K[0-9]+" app.log
+
+# Named capture groups and non-greedy matching
+grep -oP 'error="(?P<msg>[^"]+)"' app.log
+
+# Exclude certain file types when searching recursively
+grep -r --include="*.go" --exclude-dir=vendor "TODO" .
+\`\`\`
+
+### Common Mistakes with grep
+
+A frequent mistake is forgetting that grep's exit code 1 (no match) triggers \`set -e\` in scripts. Protect against this:
+
+\`\`\`bash
+# WRONG — script exits silently if no matches found
+set -e
+COUNT=$(grep -c "ERROR" app.log)
+
+# RIGHT — use || true to allow non-match exit code
+COUNT=$(grep -c "ERROR" app.log || true)
+
+# Or test for existence separately
+if grep -q "CRITICAL" app.log; then
+  echo "Critical errors found"
+fi
 \`\`\`
 
 ---
 
 ## sed — Stream Editor
 
-\`sed\` applies editing commands to each line of input.
+\`sed\` (Stream EDitor) applies editing commands to text as it flows through a stream. Unlike a regular text editor, sed processes one line at a time and can edit files in-place without loading them fully into memory — critical for multi-gigabyte log files.
+
+### How sed Works: Pattern Space and Address Mechanism
+
+sed maintains a **pattern space** (the current line being processed) and an optional **hold space** (a scratchpad). For each input line, sed: copies the line into the pattern space, applies commands, then (by default) prints the pattern space to stdout.
+
+The **address mechanism** controls which lines a command applies to:
+- No address: applies to every line
+- Single line number: \`3d\` deletes only line 3
+- Last line: \`\$\` refers to the last line
+- Regex address: \`/pattern/d\` deletes lines matching pattern
+- Range: \`5,10d\` deletes lines 5 through 10
+- Regex range: \`/BEGIN/,/END/d\` deletes from first match to second match
 
 \`\`\`bash
-# Substitute first occurrence on each line
+# The s (substitute) command: s/pattern/replacement/flags
+# Without the g flag: replaces only the FIRST match per line
 sed 's/foo/bar/' file.txt
 
-# Substitute ALL occurrences on each line (global flag)
+# With g (global) flag: replaces ALL matches per line
+# This is the flag you forget and then wonder why only the first changed
 sed 's/foo/bar/g' file.txt
 
-# Edit the file in-place (macOS needs an extension argument)
+# i flag (case-insensitive substitution)
+sed 's/error/ERROR/gi' app.log
+
+# Edit the file in-place — -i takes a backup suffix (or '' on macOS)
+# ALWAYS test without -i first and verify output before going in-place
 sed -i '' 's/localhost/db.prod.internal/g' app.conf   # macOS
-sed -i 's/localhost/db.prod.internal/g' app.conf      # Linux
+sed -i 's/localhost/db.prod.internal/g' app.conf      # Linux/GNU
 
-# Delete lines matching a pattern
-sed '/^#/d' config.ini        # strip comment lines
-sed '/^$/d' file.txt          # strip blank lines
+# Use a different delimiter when the pattern contains /
+# This avoids escaping URLs like http://old-api/v1
+sed 's|http://old-api/v1|https://new-api/v2|g' config.yaml
 
-# Print only matching lines (-n suppresses default output)
+# Delete lines matching a pattern (d command)
+sed '/^#/d' config.ini        # strip comment lines (start with #)
+sed '/^$/d' file.txt          # strip blank lines (empty lines)
+sed '/DEBUG/d' app.log        # remove debug log lines
+
+# Print only matching lines: -n suppresses default output, p forces print
+# Equivalent to grep but allows address ranges and other sed logic
 sed -n '/ERROR/p' app.log
 
-# Address ranges: operate only on lines 10 through 20
-sed -n '10,20p' bigfile.txt
+# Address ranges: act only on a range of lines
+sed -n '10,20p' bigfile.txt              # print lines 10-20 only
+sed '1d' file.txt                         # delete the header line
+sed '$d' file.txt                         # delete the last line
 
-# Address range with regex delimiters
-sed '/BEGIN/,/END/d' script.sql   # delete between markers
+# Regex address ranges: delete everything between BEGIN and END markers
+# Useful for removing sections from config templates
+sed '/BEGIN CERT/,/END CERT/d' bundle.pem
 
-# Insert a line before a match
+# Insert (i) a line BEFORE the matching line
+# Append (a) a line AFTER the matching line
 sed '/^server {/i upstream backend { server 127.0.0.1:8080; }' nginx.conf
+sed '/listen 80;/a \    listen [::]:80;' nginx.conf   # add IPv6 after IPv4
 
-# Multi-expression chaining
-sed -e 's/WARN/WARNING/g' -e 's/ERR/ERROR/g' app.log
+# Change (c) an entire line matching the pattern
+sed '/^JAVA_OPTS=/c JAVA_OPTS="-Xmx2g -Xms512m"' /etc/default/myapp
+
+# Multi-expression: chain multiple commands with -e or semicolons
+sed -e 's/WARN/WARNING/g' -e 's/ERR$/ERROR/g' app.log
+sed 's/WARN/WARNING/g; s/ERR$/ERROR/g' app.log   # equivalent
+
+# Practical: increment a version number in a Makefile
+# Extracts the number after VERSION = and increments it
+sed 's/VERSION = \([0-9]*\)/echo "VERSION = \$((\\1 + 1))"/e' Makefile
+\`\`\`
+
+### sed Address Ranges in Depth
+
+The range \`/pattern1/,/pattern2/\` is especially powerful for config manipulation:
+
+\`\`\`bash
+# Extract a specific server block from nginx config
+sed -n '/server_name api.example.com/,/^}/p' /etc/nginx/sites-available/
+
+# Replace content of a specific YAML section (between two markers)
+sed '/^  database:/,/^  [a-z]/{ /host:/s/.*/  host: prod.db.internal/ }' config.yaml
+
+# Delete everything after a line matching a pattern (to end of file)
+sed '/^# END CONFIG/,$d' config.ini
 \`\`\`
 
 ---
 
 ## awk — Programmable Field Processor
 
-\`awk\` splits each line into fields and lets you write full programs.
+\`awk\` is a complete programming language designed for processing structured text. Where grep filters lines and sed transforms text, awk can aggregate, compute, reformat, and report — all in a single pass through a file.
+
+### How awk Works: Records, Fields, and Programs
+
+awk reads input as **records** (default: one line = one record). Each record is split into **fields** by a separator (default: any whitespace). Fields are accessed as \$1, \$2, \$3, ... with \$0 being the entire record and \$NF being the last field.
+
+An awk program is a series of \`pattern { action }\` pairs. For each record:
+1. If pattern matches (or no pattern), execute action
+2. Special patterns \`BEGIN\` and \`END\` run before/after all input
 
 \`\`\`bash
 # Print the 2nd and 5th fields (default separator: whitespace)
 awk '{print \$2, \$5}' access.log
 
-# Use a custom field separator
-awk -F: '{print \$1}' /etc/passwd         # print all usernames
+# -F sets the field separator (like cut -d but smarter)
+awk -F: '{print \$1}' /etc/passwd         # extract usernames
 awk -F, '{print \$3}' data.csv            # 3rd column of CSV
+awk -F'\t' '{print \$2}' data.tsv         # TSV second column
 
-# NR = record number, NF = number of fields
-awk 'NR==1 || NR%100==0 {print NR, \$0}' bigfile.txt   # header + every 100th line
-awk 'NF > 3' data.txt                                  # lines with more than 3 fields
+# Built-in variables:
+# NR = Number of Records (total lines seen so far)
+# NF = Number of Fields in current record
+# FS = Field Separator (modifiable per-line)
+# RS = Record Separator (default: newline)
+# OFS = Output Field Separator (used between fields in print)
 
-# BEGIN and END blocks
-awk 'BEGIN {total=0} {total += \$4} END {print "Total bytes:", total}' access.log
+# Print record number and line for every 100th line (header + sampling)
+awk 'NR==1 || NR%100==0 {print NR, \$0}' bigfile.txt
 
-# Conditional logic
-awk '\$9 >= 500 {print \$1, \$7, \$9}' access.log   # HTTP 5xx responses
+# Lines with more than 3 fields (dynamic content check)
+awk 'NF > 3' data.txt
 
-# printf for formatted output
-awk '{printf "%-20s %8.2f MB\n", \$1, \$2/1024}' disk_usage.txt
+# Lines where the 5th field is greater than 1000
+awk '\$5 > 1000 {print \$0}' metrics.log
 
-# Count occurrences of each status code
+# BEGIN block: runs once before any input (initialization, headers)
+# END block: runs once after all input (aggregation, summaries)
+awk 'BEGIN { print "Bytes by IP:"; total=0 }
+     { total += \$10; bytes[\$1] += \$10 }
+     END { for (ip in bytes) printf "%-20s %10d\\n", ip, bytes[ip] }
+    ' access.log | sort -k2 -rn
+
+# Conditional logic — HTTP 5xx responses (field 9 = status code)
+awk '\$9 >= 500 && \$9 < 600 {print \$1, \$7, \$9}' access.log
+
+# printf for precise formatting (just like C)
+# %-20s = left-aligned, 20-char wide string; %8.2f = 8-wide float with 2 decimals
+awk '{printf "%-20s %8.2f MB\\n", \$1, \$2/1024}' disk_usage.txt
+
+# Associative arrays: awk's built-in hash maps — keys can be strings or numbers
+# Count HTTP status code occurrences across the entire log
 awk '{codes[\$9]++} END {for (c in codes) print c, codes[c]}' access.log | sort -n
 
-# Real-world: top 10 IPs by request count from nginx log
+# Real-world: top 10 IPs by request count from nginx combined log format
+# Field 1 is remote IP in standard nginx log format
 awk '{print \$1}' access.log | sort | uniq -c | sort -rn | head -10
+
+# Multi-value aggregation: requests and bytes per HTTP method
+awk '{method[\$6]++; bytes[\$6]+=\$10}
+     END {for (m in method) printf "%-8s %6d requests  %10d bytes\\n", m, method[m], bytes[m]}
+    ' access.log | sort
+
+# Reformatting: convert space-separated to CSV
+awk 'BEGIN{OFS=","} {print \$1,\$2,\$3}' data.txt
+
+# Getline: read the next line within an awk action
+# Useful for processing two-line records (key on line N, value on line N+1)
+awk '/^HOST:/ { getline value; print substr(\$0, 6), value }' headers.txt
+
+# Piping within awk: send output to a system command
+awk '/CRITICAL/ { print | "mail -s 'Alert' ops@example.com" }' app.log
 \`\`\`
+
+### awk vs cut for Field Extraction
+
+\`cut\` is faster and simpler for fixed-delimiter extraction. \`awk\` is more powerful for:
+- Multiple field separators
+- Computed field numbers (\$NF, \$(NF-1))
+- Conditional logic on the extracted fields
+- Aggregation across all records
+
+Use \`cut\` when you just need columns. Use \`awk\` when you need logic.
 
 ---
 
 ## sort, uniq, cut, tr, wc
 
-These tools are the glue of any pipeline.
+These tools are the connective tissue of any pipeline.
+
+### sort — Ordering Lines
+
+sort reads all input, then outputs it sorted. The default is lexicographic (dictionary order). Numeric sort (-n) is completely different — without it, "10" sorts before "9".
 
 \`\`\`bash
-# sort: lexicographic by default
+# Lexicographic sort (default): "10" < "2" because "1" < "2" as chars
 sort names.txt
 
-# Sort numerically, reverse order
+# Numeric sort (-n): 2 < 10 as numbers
+sort -n numbers.txt
+
+# Reverse order (-r)
 sort -rn sizes.txt
 
-# Sort by 3rd field, tab-delimited
-sort -t$'\\t' -k3 -rn data.tsv
+# Sort by a specific field (-k) with a custom delimiter (-t)
+# -k3 means "sort by field 3"
+# -k2,2n means "sort by field 2 only (not continuing to field 3), numerically"
+sort -t: -k3 -n /etc/passwd              # sort by UID
+sort -t$'\\t' -k3 -rn data.tsv            # tab-delimited, field 3, numeric, reverse
 
-# uniq: collapses adjacent duplicate lines (always sort first!)
-sort words.txt | uniq           # unique lines
-sort words.txt | uniq -c        # count duplicates
-sort words.txt | uniq -d        # only duplicates
-sort words.txt | uniq -u        # only unique (appeared once)
+# Sort by multiple keys (primary and secondary sort)
+sort -k1,1 -k2,2n data.tsv               # field 1 alphabetically, then field 2 numerically
 
-# cut: extract columns
-cut -d: -f1,3 /etc/passwd       # username and UID fields
-cut -c1-10 file.txt             # first 10 characters of each line
+# Human-readable size sort (-h): understands K, M, G suffixes
+du -sh /var/log/* | sort -rh             # largest directories first
 
-# tr: transliterate characters
-echo "hello world" | tr 'a-z' 'A-Z'        # uppercase
-echo "path/to/file" | tr '/' '.'            # replace / with .
-cat file.txt | tr -d '\\r'                   # strip Windows line endings
-cat file.txt | tr -s ' '                    # squeeze repeated spaces to one
+# Unique sort (-u): sort and remove duplicates in one pass (faster than sort | uniq)
+sort -u names.txt
 
-# wc: word/line/byte counts
-wc -l access.log          # line count
-wc -w essay.txt           # word count
-wc -c binary.dat          # byte count
+# Stability: GNU sort is stable (-s explicit), preserves equal-key order
+sort -s -k1,1 data.txt
+
+# Large file sort (-S buffer size): increase memory to avoid disk spills
+sort -S 2G bigfile.txt
 \`\`\`
+
+### uniq — Collapse Consecutive Duplicates
+
+**Critical caveat:** uniq only collapses ADJACENT duplicate lines. You almost always need to sort first.
+
+\`\`\`bash
+# Basic deduplication (must be sorted!)
+sort words.txt | uniq
+
+# Count occurrences (-c): prepends a count to each unique line
+# The count + sort -rn pattern is the foundation of frequency analysis
+sort words.txt | uniq -c
+
+# Show ONLY duplicate lines (-d = "duplicates")
+sort words.txt | uniq -d
+
+# Show ONLY unique lines — appeared exactly once (-u)
+sort words.txt | uniq -u
+
+# Ignore case when comparing (-i)
+sort -f words.txt | uniq -i
+
+# Compare only first N characters (-w N)
+sort log.txt | uniq -w 10   # deduplicate based on first 10 chars only
+\`\`\`
+
+### cut — Extract Columns by Position or Delimiter
+
+\`cut\` extracts sections from each line. Fast but limited — no regex, no conditionals.
+
+\`\`\`bash
+# Extract fields by delimiter (-d) and field numbers (-f)
+cut -d: -f1 /etc/passwd                 # usernames (field 1)
+cut -d: -f1,3 /etc/passwd               # username and UID (fields 1 and 3)
+cut -d: -f1-3 /etc/passwd               # fields 1 through 3
+cut -d, -f2- report.csv                 # all fields from 2 onwards (skip first)
+
+# Extract by character position (-c)
+cut -c1-10 file.txt                     # first 10 characters of each line
+cut -c5-   file.txt                     # from character 5 to end of line
+
+# Practical: extract the second column from a space-separated file
+# Note: multiple spaces = multiple delimiters, which confuses cut
+# awk handles this better: awk '{print $2}'
+cut -d' ' -f2 file.txt  # only works if exactly one space between fields
+\`\`\`
+
+### tr — Character Translation
+
+\`tr\` operates on individual characters, not patterns. It's the fastest tool for character-level transformations.
+
+\`\`\`bash
+# Translate (map) characters: a-z to A-Z (uppercase)
+echo "hello world" | tr 'a-z' 'A-Z'
+
+# Replace one character with another
+echo "path/to/file" | tr '/' '.'           # dots instead of slashes
+echo "192.168.1.1" | tr '.' '_'            # safe filename from IP
+
+# Delete characters (-d = "delete")
+cat file.txt | tr -d '\\r'                  # strip Windows CRLF carriage returns
+echo "h3ll0 w0rld" | tr -d '0-9'           # remove all digits
+
+# Squeeze repeated characters (-s = "squeeze")
+# Replaces runs of the same character with a single instance
+echo "hello    world" | tr -s ' '          # squeeze spaces to one
+echo "aaabbbccc" | tr -s 'a-z'             # squeeze any repeated lowercase
+
+# Complement (-c = "complement"): operate on characters NOT in the set
+echo "abc123def" | tr -cd '0-9'            # keep only digits
+echo "hello!" | tr -cd 'a-zA-Z\\n'          # keep only letters and newlines
+
+# Character classes (POSIX): [:alpha:], [:digit:], [:space:], [:upper:], [:lower:]
+echo "Hello World" | tr '[:upper:]' '[:lower:]'  # portable lowercase
+\`\`\`
+
+### wc — Count Words, Lines, Bytes
+
+\`\`\`bash
+wc -l access.log          # line count — most common use in DevOps
+wc -w essay.txt           # word count
+wc -c binary.dat          # byte count (c = "characters" but actually bytes)
+wc -m unicode.txt         # character count (multi-byte aware)
+
+# Count without filename: pipe stdin
+cat access.log | wc -l
+
+# Multiple files: shows count per file and a total
+wc -l /var/log/*.log
+
+# Combine with grep: count matching lines
+grep "ERROR" app.log | wc -l
+# Note: use grep -c "ERROR" app.log instead — avoids a pipe process
+\`\`\`
+
+---
+
+## How It Works: The Unix Pipeline Model
+
+When you write \`grep "ERROR" app.log | awk '{print \$5}' | sort | uniq -c | sort -rn | head -10\`, the shell creates 6 processes connected by pipes. Each process reads from stdin as fast as the next one can consume — no intermediate files, no waiting for one to finish before the next starts. The kernel buffers data in pipe ring buffers (typically 64KB). This is why pipelines on a 10GB log file use almost no memory — only the buffer is in RAM at any time.
+
+---
+
+## Common Mistakes
+
+1. **Forgetting \`uniq\` needs sorted input** — if you skip \`sort\`, identical non-adjacent lines don't collapse
+2. **Not using \`-g\` in sed** — forgetting the global flag means only the first match per line is replaced
+3. **Using \`cut\` for variable-width whitespace** — \`cut -d' ' -f2\` fails when fields have multiple spaces; use \`awk '{print \$2}'\` instead
+4. **Not escaping dots in sed** — \`sed 's/10.0.0.1/10.0.0.2/g'\` matches "10X0X0X1" because \`.\` is regex "any char". Use \`sed 's/10\\.0\\.0\\.1/10.0.0.2/g'\`
+5. **Comparing numbers without \`-n\`** — \`sort\` without \`-n\` sorts "100" before "20" because "1" < "2" lexicographically
 
 ---
 
@@ -199,7 +477,7 @@ wc -c binary.dat          # byte count
 # Find the 5 slowest API endpoints from a log where field 7 is path and field 10 is ms
 awk '{print \$7, \$10}' api.log | sort -k2 -rn | head -5
 
-# Count unique 4xx errors by path
+# Count unique 4xx errors by path — useful for finding broken links or bad clients
 grep -E ' 4[0-9]{2} ' access.log \\
   | awk '{print \$7}' \\
   | sort | uniq -c | sort -rn | head -20
@@ -216,6 +494,34 @@ du -sh /var/log/* | sort -h | tail -10
 
 # Parse CSV: sum the 4th column, skip header
 tail -n +2 sales.csv | awk -F, '{sum += \$4} END {printf "Total: \$%.2f\\n", sum}'
+
+# Parse /var/log/nginx/access.log: find top 10 IPs with 5xx errors
+# Standard nginx combined log: $1=IP $9=status $10=bytes
+awk '\$9 >= 500 {errors[\$1]++} END {for (ip in errors) print errors[ip], ip}' \\
+  /var/log/nginx/access.log | sort -rn | head -10
+
+# Calculate error rate: percentage of 5xx responses in last 1000 lines
+tail -1000 /var/log/nginx/access.log | \\
+  awk '{total++; if (\$9>=500) errors++} END {printf "Error rate: %.1f%%\\n", errors*100/total}'
+
+# Find files modified today that are larger than 10MB (audit log)
+find /var/log -type f -newer /var/log/syslog -size +10M -exec ls -lh {} \\;
+\`\`\`
+
+## Production Pattern: Log Analysis One-Liner Template
+
+\`\`\`bash
+# Template for analyzing any structured log file:
+# 1. Filter relevant lines (grep)
+# 2. Extract the field you care about (awk)
+# 3. Count occurrences (sort | uniq -c)
+# 4. Show top N (sort -rn | head)
+grep "<filter>" <logfile> | awk '{print \$<field_number>}' | sort | uniq -c | sort -rn | head -20
+
+# Real example: top User-Agent strings in nginx log (field 12 onward, quoted)
+grep -v "bot\\|crawler" /var/log/nginx/access.log \\
+  | awk -F'"' '{print \$6}' \\
+  | sort | uniq -c | sort -rn | head -20
 \`\`\`
 
 > **Practice tip:** Pipe \`dmesg\`, \`/var/log/syslog\`, or any application log through these tools. Real logs beat toy examples every time.`,
@@ -328,250 +634,555 @@ A common optimization for very large logs: use awk to both extract and count in 
           tags: ["find", "xargs", "tar", "rsync", "curl", "jq", "yq", "json", "yaml"],
           content: `## File System & Remote Utilities
 
-These tools operate on files, archives, network resources, and structured data. In DevOps, they appear in every backup script, deployment pipeline, and API integration.
+These tools operate on files, archives, network resources, and structured data. In DevOps, they appear in every backup script, deployment pipeline, and API integration. Where the text-processing tools (grep, sed, awk) transform content, this group of tools manages where content lives — finding it, archiving it, synchronizing it, fetching it, and parsing it.
 
 ---
 
 ## find — Deep File Search
 
-\`find\` traverses directory trees and evaluates expressions against each file.
+\`find\` traverses directory trees and evaluates a chain of predicates against each file it encounters. It is the right tool any time you need to act on files based on their properties (name, size, age, permissions) rather than their content.
+
+### How find Works
+
+find performs a depth-first traversal by default. It evaluates each found path against the predicate expression (AND is implicit, OR requires \`-o\`). Only when the full expression is true does find take action. The default action is \`-print\`, but you can substitute \`-delete\`, \`-exec\`, or \`-print0\`.
 
 \`\`\`bash
-# Basic: find all .log files from the current directory
+# Basic: find all .log files from the current directory (recursive by default)
 find . -name "*.log"
 
-# By type: f=file, d=directory, l=symlink
+# -maxdepth limits traversal depth (1 = current directory only, no recursion)
+find /var/log -maxdepth 1 -name "*.log"
+
+# -mindepth skips the top N levels (useful to skip the root dir itself)
+find /etc -mindepth 2 -name "*.conf"  # configs at least 2 levels deep
+
+# By type: f=regular file, d=directory, l=symbolic link, p=named pipe, s=socket
 find /var -type f -name "*.conf"
-find /tmp -type d -empty          # empty directories
+find /tmp -type d -empty          # empty directories (good for cleanup audits)
+find /etc -type l                 # find all symlinks in /etc
 
-# By size
-find /var/log -type f -size +100M          # larger than 100 MB
-find /home -type f -size -10k              # smaller than 10 KB
+# By size: k=kilobytes, M=megabytes, G=gigabytes
+# + means "more than", - means "less than", no prefix means "exactly"
+find /var/log -type f -size +100M          # files larger than 100 MB
+find /home -type f -size -10k              # files smaller than 10 KB
+find /data -type f -size +1G               # files larger than 1 GB (big file audit)
 
-# By modification time (-mtime uses days, -mmin uses minutes)
-find /tmp -mtime +7                        # not modified in 7+ days
-find /var/log -mmin -60                    # modified in last 60 minutes
+# By modification time:
+# -mtime uses days (integer), -mmin uses minutes
+# +N = more than N days/minutes ago (older)
+# -N = less than N days/minutes ago (newer/recent)
+find /tmp -mtime +7                        # files not modified in 7+ days (stale)
+find /var/log -mmin -60                    # files modified in last 60 minutes
+find /data -newer /tmp/checkpoint.txt      # files newer than a reference file
 
-# Combine predicates (AND is default, -o for OR, ! for NOT)
+# By permissions: exact match or mode check
+find /var/www -type f -perm 777            # world-writable files (security audit)
+find /etc -type f -perm -o+w              # any file others can write (dangerous)
+find /usr/local/bin -type f -perm -u+x    # executable by owner
+
+# By owner
+find /home -user alice -type f            # files owned by alice
+find /var/run -not -user root -type f     # files NOT owned by root
+
+# Combine predicates: AND is implicit (both must be true)
 find . -name "*.py" -not -path "*/venv/*"  # Python files outside venv
-find . \\( -name "*.jpg" -o -name "*.png" \\) -size +1M
+find . -name "*.py" -not -path "*/.git/*" -not -path "*/node_modules/*"
+
+# OR with -o (must wrap in parentheses, escaped from shell)
+find . \\( -name "*.jpg" -o -name "*.png" -o -name "*.webp" \\) -size +1M
 
 # -exec: run a command on each found file
-find . -name "*.tmp" -exec rm {} \\;        # delete each tmp file
-find . -name "*.sh" -exec chmod +x {} +    # batch chmod (+ is faster than \\;)
+# {} is replaced by the current filename
+# \\; runs the command once per file (slower — one process per file)
+find . -name "*.tmp" -exec rm {} \\;
 
-# Print0 + xargs -0: safe handling of spaces in filenames
+# + batches all filenames into as few invocations as possible (much faster)
+find . -name "*.sh" -exec chmod +x {} +
+
+# -delete: atomic, faster than -exec rm — but no confirmation!
+# Always test with -print first before using -delete
+find /tmp -mtime +7 -type f -print        # FIRST: verify what will be deleted
+find /tmp -mtime +7 -type f -delete       # THEN: delete
+
+# -print0 + xargs -0: null-delimited pipeline, handles spaces in filenames
 find . -name "*.log" -print0 | xargs -0 gzip
+
+# Practical: find and delete empty directories (recursive cleanup)
+find /data -type d -empty -delete
+
+# Find files by inode number (useful after moving files)
+find / -inum 1234567 2>/dev/null
+
+# Find recently-changed config files (change audit)
+find /etc -newer /etc/last_audit -type f -ls 2>/dev/null
 \`\`\`
+
+### Common find Mistakes
+
+1. **Forgetting quotes on wildcards** — \`find . -name *.log\` expands glob in the shell before find runs, potentially matching only current directory. Always quote: \`find . -name "*.log"\`
+2. **Not using \`-type f\`** — \`find /tmp -delete\` would delete directories too. Always specify \`-type f\` for file-only operations
+3. **Using \`\\;\` for large batches** — one process per file is slow for thousands of files. Use \`+\` or pipe to \`xargs\`
 
 ---
 
 ## xargs — Build Commands from Input
 
-\`xargs\` takes stdin and passes it as arguments to a command.
+\`xargs\` solves a fundamental Unix problem: many commands accept filenames as arguments, but you often have a list of filenames from stdin (from find, grep -l, etc.). xargs bridges this gap by converting stdin lines into command arguments.
+
+### Why xargs Exists: The Argument Length Limit
+
+Unix systems have a maximum command-line argument length (ARG_MAX, typically 2MB on Linux). If you try \`rm $(find . -name "*.log")\` with thousands of files, the shell expansion could exceed ARG_MAX and fail with "Argument list too long". xargs automatically batches arguments to stay under this limit.
 
 \`\`\`bash
-# Basic usage
-echo "file1.txt file2.txt" | xargs rm
+# Basic usage: pass stdin as arguments to a command
+echo "file1.txt file2.txt file3.txt" | xargs rm
 
-# -I{} for placeholder substitution
+# -I{}: placeholder substitution — {} is replaced by each input item
+# Required when you need the input somewhere other than the end of the command
 find . -name "*.bak" | xargs -I{} mv {} {}.old
 
-# Parallel execution with -P
+# Parallel execution with -P (N parallel processes)
+# This is one of the simplest ways to parallelize file operations
 find . -name "*.jpg" | xargs -P4 -I{} convert {} -resize 800x600 {}_resized.jpg
+# -P4 = run up to 4 concurrent convert processes
 
-# Limit args per invocation with -n
-cat hosts.txt | xargs -n1 ping -c1     # ping each host separately
+# -n max-args: limit how many arguments per invocation
+# Useful when the command only handles one item at a time
+cat hosts.txt | xargs -n1 ping -c1     # ping each host in its own process
+cat packages.txt | xargs -n5 apt-get install -y  # install 5 at a time
 
-# Combine with grep for project-wide search
-find . -name "*.go" | xargs grep -l "TODO"
+# -0 (zero): read null-delimited input (from find -print0)
+# Handles filenames with spaces, tabs, newlines
+find . -name "*.log" -print0 | xargs -0 -P2 gzip
 
-# Dry run: see what would happen
-find /tmp -mtime +30 -print | xargs -I{} echo "Would delete: {}"
+# Combine find and xargs for project-wide operations
+find . -name "*.go" -print0 | xargs -0 grep -l "TODO"
+find . -name "*.yaml" -print0 | xargs -0 yamllint
+
+# Dry run: see what WOULD happen
+find /tmp -mtime +30 -print0 | xargs -0 -I{} echo "Would delete: {}"
+
+# -t (trace): print each command before executing (debugging)
+cat servers.txt | xargs -t -I{} ssh {} "uptime"
+
+# Verify xargs is available and check its options on macOS vs Linux
+# macOS (BSD xargs) differs from GNU xargs — -P exists on both, -d doesn't on macOS
+# Use -print0 / -0 for cross-platform safety
+
+# Real DevOps use: restart services on multiple servers
+cat servers.txt | xargs -P5 -I{} ssh {} "sudo systemctl restart myapp"
 \`\`\`
 
 ---
 
 ## tar — Archives
 
-\`tar\` creates and extracts archive files. The flags are classic: **c**reate, e**x**tract, **t**est/list, **v**erbose, **f**ile, **z** (gzip), **j** (bzip2), **J** (xz).
+\`tar\` (Tape ARchive) combines multiple files and directories into a single file, optionally compressed. The name comes from its original use with magnetic tape drives. Despite its age (1979), it remains the standard for Unix archives.
+
+### Why tar Separates Archive and Compress
+
+tar itself creates an archive (bundles files + preserves metadata) without compression. Compression is delegated to gzip (-z), bzip2 (-j), or xz (-J). This separation is intentional: you can pipe a tar stream through any compression tool, or stream it directly to/from storage without creating intermediate files.
 
 \`\`\`bash
-# Create a gzipped archive
-tar -czf backup.tar.gz /var/www/html/
+# Creating archives — the flags spell out their meaning:
+# -c create, -z gzip, -j bzip2, -J xz, -v verbose, -f file
+tar -czf backup.tar.gz /var/www/html/    # gzip: fastest, moderate compression
+tar -cjf archive.tar.bz2 ./data/         # bzip2: slower, better compression
+tar -cJf archive.tar.xz ./data/          # xz: slowest, best compression (~30% better than gzip)
 
-# Create with exclusions
-tar -czf app.tar.gz ./app/ --exclude="./app/node_modules" --exclude="./app/.git"
+# Compression comparison for a typical directory:
+# gzip:  compress=0.5s  decompress=0.1s  ratio=65%
+# bzip2: compress=3s    decompress=1s    ratio=75%
+# xz:    compress=15s   decompress=0.5s  ratio=80%
+# For most DevOps use (CI artifacts, deployments): gzip wins (speed matters)
+# For long-term storage: xz wins (ratio matters)
 
-# Extract to a specific directory
+# Create with exclusions — critical for application backups
+tar -czf app.tar.gz ./app/ \\
+  --exclude="./app/node_modules" \\
+  --exclude="./app/.git" \\
+  --exclude="./app/__pycache__" \\
+  --exclude="./app/*.pyc"
+
+# Extract to a specific directory (-C = change directory before extracting)
 tar -xzf backup.tar.gz -C /restore/
 
-# List contents without extracting
+# List contents without extracting — verify an archive before extracting
 tar -tzf backup.tar.gz | head -20
+tar -tjf archive.tar.bz2 | grep "config"  # check if config files are in there
 
-# Extract a single file
+# Extract a single file from a large archive
 tar -xzf backup.tar.gz ./app/config/settings.py
 
-# Create a bzip2 archive (better compression, slower)
-tar -cjf archive.tar.bz2 ./data/
+# Stream tar output to stdout (-f -) — avoids needing local disk space
+# Pipe directly to S3 without creating the archive file locally
+tar -czf - /opt/app | aws s3 cp - s3://my-bucket/backups/app-\$(date +%Y%m%d).tar.gz
 
-# Incremental backup: only files newer than a snapshot
+# Stream from S3 and extract on the fly
+aws s3 cp s3://my-bucket/backups/app-20240115.tar.gz - | tar -xzf - -C /opt/app/
+
+# Incremental backup: only files newer than a reference timestamp
 tar -czf incremental.tar.gz --newer-mtime="2024-01-01" /var/data/
+
+# Add files to existing archive (only uncompressed .tar, not .tar.gz)
+tar -rf existing.tar newfile.txt
+
+# List archive with permissions and timestamps
+tar -tvf backup.tar.gz | grep "config"
+\`\`\`
+
+### tar: The -C Flag and Path Conventions
+
+A common tar pitfall: paths in the archive. If you run \`tar -czf backup.tar.gz /var/www/html\`, the archive contains absolute paths starting with \`/var/www/html/\`. Extracting without care will try to write to \`/var/www/html\` on the target machine.
+
+Best practice: always \`cd\` first and use relative paths, or use \`-C\` to establish a relative root:
+
+\`\`\`bash
+# Bad: absolute paths in archive
+tar -czf backup.tar.gz /var/www/html/  # paths start with var/www/html/
+
+# Good: relative paths
+tar -czf backup.tar.gz -C /var/www html/  # paths start with html/
+
+# Extract safely to a target directory
+tar -xzf backup.tar.gz -C /restore/       # extracts as /restore/html/
 \`\`\`
 
 ---
 
 ## rsync — Smart File Synchronization
 
-\`rsync\` transfers only changed bytes — far more efficient than \`cp\` or \`scp\` for large directories.
+\`rsync\` is the right tool for any large-scale file synchronization. Unlike \`cp\` which always copies everything, rsync uses a **delta-transfer algorithm**: it breaks files into blocks, computes checksums, and only transfers blocks that have changed. This makes it orders of magnitude faster for keeping large directories in sync after an initial copy.
+
+### How rsync's Delta Algorithm Works
+
+1. rsync on the sender calculates checksums for each block of each file
+2. rsync on the receiver does the same for its existing files
+3. They compare checksums and only transfer blocks where they differ
+4. On the receiver, modified blocks are patched into the existing file
+
+For a 1GB file where only 10MB changed, rsync transfers ~10MB instead of 1GB. This is why rsync is used for deployments, backups, and CDN syncs.
 
 \`\`\`bash
-# Basic sync: src to dest (trailing slash on src matters!)
-rsync -av /src/dir/ /dest/dir/        # sync contents of dir/
-rsync -av /src/dir  /dest/            # sync the dir itself into dest/
+# Basic sync: trailing slash on source is CRITICAL — easy to get wrong
+# With trailing slash: sync CONTENTS of src into dest
+rsync -av /src/dir/ /dest/dir/        # files appear directly in /dest/dir/
 
-# Sync to remote over SSH
-rsync -avz -e ssh /local/app/ user@server:/var/www/app/
+# Without trailing slash: sync the DIRECTORY ITSELF into dest
+rsync -av /src/dir  /dest/            # creates /dest/dir/ with files inside
 
-# --delete: remove files in dest that don't exist in src
+# The -a (archive) flag is a shorthand for: -rlptgoD
+# -r recursive  -l copy symlinks as symlinks  -p preserve permissions
+# -t preserve timestamps  -g preserve group  -o preserve owner  -D device files
+rsync -av /src/ /dest/
+
+# Sync to remote over SSH — rsync uses SSH as transport by default for remote
+rsync -avz -e ssh /local/app/ deploy@prod-server:/var/www/app/
+# -z = compress during transfer (helpful for text files over slow networks)
+
+# Custom SSH options (non-standard port, specific key)
+rsync -av -e "ssh -p 2222 -i ~/.ssh/deploy_rsa" /src/ user@server:/dest/
+
+# --delete: remove files in dest that are NOT in src
+# This makes dest an exact MIRROR of src — use with extreme caution
+# A wrong src path can delete all of dest
 rsync -av --delete /src/ /dest/
 
-# --dry-run: show what WOULD be transferred without doing it
+# ALWAYS use --dry-run before any destructive rsync operation
+# Shows exactly what WOULD be transferred/deleted without doing it
 rsync -av --dry-run --delete /src/ /dest/
 
-# Exclude patterns
-rsync -av --exclude="*.log" --exclude="node_modules/" /src/ /dest/
+# --backup + --backup-dir: move deleted files to a dated backup instead of erasing
+rsync -av --delete \\
+  --backup --backup-dir=/backup/\$(date +%Y%m%d) \\
+  /prod/ /mirror/
 
-# Preserve all attributes, useful for system backups
+# --max-delete: abort if too many files would be deleted (safety net)
+# Protects against accidentally syncing an empty source over a full dest
+rsync -av --delete --max-delete=100 /src/ /dest/
+
+# Exclude patterns — patterns are matched against the relative path from src
+rsync -av --exclude="*.log" --exclude="node_modules/" --exclude=".git/" /src/ /dest/
+rsync -av --exclude-from=".rsyncignore" /src/ /dest/
+
+# Preserve extended attributes and ACLs (system backup)
 rsync -aAXHv /home/ /backup/home/
+# -A preserve ACLs  -X preserve extended attributes  -H preserve hard links
 
-# Show progress for large transfers
+# Show progress for large transfers (--info=progress2 for overall progress)
 rsync -av --progress large_file.iso user@server:/storage/
+rsync -av --info=progress2 /big/dir/ /dest/
 
-# Bandwidth limit (100 KB/s) to avoid saturating the network
-rsync -av --bwlimit=100 /data/ /backup/
+# Bandwidth limit (KB/s) — prevent saturating production network
+rsync -av --bwlimit=50000 /data/ /backup/   # limit to 50 MB/s
+
+# Verify transfer integrity with checksums (slower but trustworthy)
+rsync -avc /src/ /dest/    # -c = compare by checksum, not just size+timestamp
 \`\`\`
 
 ---
 
 ## curl — HTTP Swiss Army Knife
 
+\`curl\` (Client URL) is a command-line tool for transferring data using any network protocol — but it's primarily used for HTTP. In DevOps, it's indispensable for health checks, API calls, downloading artifacts, and testing endpoints.
+
+### How curl Works: The Request Lifecycle
+
+When you run \`curl https://api.example.com/data\`, curl:
+1. Resolves DNS for api.example.com
+2. Establishes a TCP connection
+3. Performs TLS handshake (for HTTPS)
+4. Sends the HTTP request (method, headers, body)
+5. Receives the response
+6. Outputs response body to stdout (or to a file with \`-o\`)
+
 \`\`\`bash
-# GET request
+# GET request (default method)
 curl https://api.example.com/users
 
-# Follow redirects, show final URL
-curl -L -w "\\nFinal URL: %{url_effective}\\n" https://short.url/abc
+# Follow HTTP redirects (-L = --location): essential for URLs that redirect
+# Without -L, curl returns the 301/302 response itself, not the final page
+curl -L https://short.url/abc
 
-# Save to file
-curl -o output.json https://api.example.com/data
+# Show HTTP response code and timing without the body (-w = --write-out)
+curl -s -o /dev/null -w "%{http_code} %{time_total}s\\n" https://api.example.com/health
+# Output: 200 0.043s
 
-# Custom headers and authentication
+# Save response to file (-o = --output)
+curl -o release.tar.gz https://releases.example.com/v1.0.tar.gz
+
+# Custom request method (-X = --request)
+curl -X DELETE https://api.example.com/users/123
+curl -X PUT -H "Content-Type: application/json" -d '{"status":"inactive"}' https://api.example.com/users/123
+
+# Custom headers (-H = --header): authentication and content type
 curl -H "Authorization: Bearer \$TOKEN" \\
      -H "Content-Type: application/json" \\
+     -H "X-Request-ID: \$(uuidgen)" \\
      https://api.example.com/protected
 
-# POST JSON body
+# POST JSON body (-d = --data)
 curl -X POST \\
      -H "Content-Type: application/json" \\
-     -d '{"name":"deploy","status":"started"}' \\
+     -d '{"name":"deploy","status":"started","version":"v2.3.1"}' \\
      https://api.example.com/events
 
-# POST form data
+# POST form data (application/x-www-form-urlencoded)
 curl -X POST -d "username=admin&password=secret" https://app/login
 
-# Show response headers only
+# POST multipart form data (-F = --form): file uploads
+curl -F "file=@/path/to/artifact.zip" -F "name=release" https://upload.example.com/
+
+# Show response headers only (-I = HEAD request)
 curl -I https://example.com
+# Check headers without downloading body (cache headers, redirects, TLS info)
 
-# Fail on HTTP error codes (useful in scripts)
-curl -f -s https://api.example.com/health || echo "Health check failed"
+# Show both request and response headers (-v = verbose)
+# Essential for debugging authentication or SSL issues
+curl -v https://api.example.com/data 2>&1 | head -50
 
-# Test TLS cert without trusting it (dangerous but useful for debugging)
-curl -k https://self-signed.example.com
+# -f (--fail): exit with code 22 on HTTP 4xx/5xx — crucial for CI/CD scripts
+# Without -f, curl exits 0 even on a 404 response
+curl -f -s https://api.example.com/health || { echo "Health check failed"; exit 1; }
+
+# -s (--silent): suppress progress meter and error messages
+# Always use in scripts where output will be parsed
+
+# Retry on failure (--retry N): useful for flaky endpoints
+curl --retry 3 --retry-delay 2 --retry-max-time 30 https://api.example.com/data
+
+# Timeout settings: --connect-timeout = TCP connect, --max-time = total transfer
+curl --connect-timeout 5 --max-time 30 https://api.example.com/data
+
+# Skip TLS certificate verification (-k = --insecure)
+# DANGEROUS in production — use only for debugging self-signed certs
+curl -k https://self-signed.internal.example.com
+
+# Upload with progress and resume capability (-C - = resume from where we left off)
+curl -C - -o large_file.iso https://mirror.example.com/ubuntu.iso
+
+# Get metrics about a request (-w with all timing fields)
+curl -s -o /dev/null -w "\\
+  dns: %{time_namelookup}s\\n\\
+  connect: %{time_connect}s\\n\\
+  ssl: %{time_appconnect}s\\n\\
+  ttfb: %{time_starttransfer}s\\n\\
+  total: %{time_total}s\\n" https://api.example.com/
+
+# Use a config file to store common options (avoids repeating -H everywhere)
+# ~/.curlrc or per-project .curlrc
+curl --config .curlrc https://api.example.com/data
+# .curlrc contents: header = "Authorization: Bearer mysecrettoken"
 \`\`\`
 
 ---
 
 ## jq — JSON Processor
 
-\`jq\` is a lightweight JSON query language. Every DevOps engineer needs it for parsing API responses.
+\`jq\` is a lightweight, streaming JSON processor. Every DevOps engineer needs it for parsing AWS CLI output, Kubernetes API responses, GitHub API calls, and any service that speaks JSON.
+
+### How jq Works
+
+jq reads JSON input (from a file or stdin), applies a filter expression, and outputs the result as JSON. Filters are composable: \`.\` is the identity (output everything), \`.foo\` extracts a field, \`.foo.bar\` navigates nested objects, \`.foo[]\` iterates an array. Filters are chained with \`|\` just like shell pipes.
 
 \`\`\`bash
-# Pretty-print JSON
+# Pretty-print JSON (. is the identity filter — output everything, formatted)
 curl -s https://api.example.com/users | jq '.'
 
-# Extract a single field
+# Extract a single field (.fieldname accesses an object key)
 echo '{"name":"alice","age":30}' | jq '.name'
+# Output: "alice"  (with JSON quoting)
 
-# Iterate over an array
+# -r (raw output): strip JSON string quoting — essential when piping to other commands
+echo '{"name":"alice"}' | jq -r '.name'
+# Output: alice  (no quotes)
+
+# -c (compact output): single line per result — good for logging
+kubectl get pods -o json | jq -c '.items[] | {name: .metadata.name}'
+
+# Iterate over an array (.[] expands each element)
 curl -s https://api.example.com/pods | jq '.[] | .metadata.name'
+curl -s https://api.example.com/users | jq -r '.[].email'   # list all emails (raw)
 
-# Select with a filter
+# select(): filter objects — like WHERE in SQL
+# Only output objects where the condition is true
 curl -s https://api.example.com/pods | jq '.[] | select(.status.phase == "Failed")'
+kubectl get pods -o json | jq '.items[] | select(.metadata.namespace == "production")'
 
-# Extract multiple fields and build a new object
-kubectl get pods -o json | jq '.items[] | {name: .metadata.name, status: .status.phase}'
+# Build new objects from existing data
+kubectl get pods -o json | jq '.items[] | {name: .metadata.name, status: .status.phase, node: .spec.nodeName}'
 
-# Map over an array
+# map(): transform every element in an array
 echo '[{"v":"1.0"},{"v":"2.0"}]' | jq '[.[] | .v]'
+# Shorter equivalent: jq '[.[].v]'
 
-# Count elements
+# Count elements in array
 kubectl get pods -o json | jq '.items | length'
 
-# Get a value nested inside an array by index
-echo '{"servers":[{"host":"a"},{"host":"b"}]}' | jq '.servers[1].host'
+# Array indexing and slicing
+echo '{"servers":[{"host":"a"},{"host":"b"}]}' | jq '.servers[1].host'  # by index
+echo '{"servers":[{"host":"a"},{"host":"b"}]}' | jq '.servers[-1].host' # last element
+
+# // (alternative operator): default value if null or missing
+echo '{"name":"alice"}' | jq '.age // 0'   # 0 if age is absent
+
+# String interpolation with \(.expression)
+kubectl get pods -o json | jq -r '.items[] | "Pod: \(.metadata.name) [\(.status.phase)] on \(.spec.nodeName)"'
+
+# @csv and @tsv: format for spreadsheet export
+kubectl get pods -o json | jq -r '.items[] | [.metadata.name, .status.phase, .spec.nodeName] | @tsv'
+
+# --arg: inject shell variables safely (avoids shell injection into jq filters)
+NAMESPACE="production"
+kubectl get pods -o json | jq --arg ns "\$NAMESPACE" '.items[] | select(.metadata.namespace == \$ns)'
 
 # Real-world: parse AWS EC2 describe-instances
+# Navigating the nested Reservations[].Instances[] structure
 aws ec2 describe-instances \\
-  | jq '.Reservations[].Instances[] | {id: .InstanceId, ip: .PrivateIpAddress, state: .State.Name}'
+  | jq '.Reservations[].Instances[] | {id: .InstanceId, ip: .PrivateIpAddress, state: .State.Name, type: .InstanceType}'
+
+# Real-world: get all container images across all pods (for security scanning)
+kubectl get pods -A -o json | jq -r '.items[].spec.containers[].image' | sort -u
+
+# Aggregate: count pods by namespace
+kubectl get pods -A -o json | jq -r '.items[].metadata.namespace' | sort | uniq -c | sort -rn
 \`\`\`
 
 ---
 
 ## yq — YAML Processor
 
-\`yq\` brings jq-like querying to YAML files — essential for Kubernetes manifests and Helm values.
+\`yq\` brings jq-like querying to YAML files. It is indispensable for Kubernetes manifests, Helm values files, GitHub Actions workflows, and any YAML-heavy infrastructure.
+
+\`yq\` preserves YAML formatting, comments, and anchors during in-place edits — something \`sed\` cannot do reliably. It also converts between YAML and JSON, making it a bridge tool in pipelines.
 
 \`\`\`bash
-# Read a value
+# Read a value from YAML (same syntax as jq)
 yq '.spec.replicas' deployment.yaml
 
-# Update a value in-place
+# Update a value in-place (-i): preserves comments and formatting
 yq -i '.spec.replicas = 3' deployment.yaml
 
-# Read from multiple files
+# Update a deeply nested value (bump container image)
+yq -i '.spec.template.spec.containers[0].image = "myapp:v2.3.1"' deployment.yaml
+
+# Read from multiple YAML files at once (audit all manifests)
 yq '.metadata.name' *.yaml
 
-# Convert YAML to JSON
+# Convert YAML to JSON (for tools that only speak JSON)
 yq -o=json '.' values.yaml
 
-# Merge YAML files
-yq '. * load("overrides.yaml")' base.yaml
+# Convert JSON to YAML (-P = pretty-print YAML)
+cat config.json | yq -P '.'
+
+# Merge YAML files: apply overrides on top of base values
+# Mimics how Helm merges values.yaml with environment-specific overrides
+yq '. * load("production-overrides.yaml")' base-values.yaml
+
+# Deep merge two YAML files
+yq eval-all 'select(fileIndex == 0) * select(fileIndex == 1)' base.yaml overrides.yaml
 
 # Extract all container image names from a Kubernetes deployment
 yq '.spec.template.spec.containers[].image' deployment.yaml
+
+# Find all services using a specific image version (audit)
+yq 'select(.spec.template.spec.containers[].image == "nginx:1.21") | .metadata.name' *.yaml
+
+# Validate YAML syntax (exits non-zero on malformed YAML)
+yq '.' suspicious.yaml > /dev/null && echo "Valid YAML" || echo "Invalid YAML"
+
+# Extract GitHub Actions job names from a workflow
+yq '.jobs | keys | .[]' .github/workflows/ci.yml
 \`\`\`
 
 ---
 
-## Putting It Together
+## How It Works: Combining These Tools in Production
+
+The real power emerges when you chain these tools. Each tool handles one concern:
+- **find**: locate files by properties
+- **xargs**: convert file list to command arguments with parallelism
+- **tar**: bundle/unbundle files efficiently
+- **rsync**: synchronize to remote with delta transfers
+- **curl**: fetch/send over HTTP with retry logic
+- **jq/yq**: parse/transform structured data
 
 \`\`\`bash
 # Find all Kubernetes YAML files not updated in 30 days and archive them
+# find outputs null-delimited names → tar reads them from stdin with --null -T -
 find ./manifests -name "*.yaml" -mtime +30 -print0 \\
   | tar -czf old_manifests_\$(date +%Y%m%d).tar.gz --null -T -
 
 # Query all running pod names via kubectl + jq, then curl a health endpoint for each
+# jq -r strips JSON quoting; xargs -I{} substitutes each pod name into the URL
 kubectl get pods -o json \\
   | jq -r '.items[] | select(.status.phase=="Running") | .metadata.name' \\
   | xargs -I{} curl -sf http://{}.pod.cluster.local/healthz
 
 # Download, verify, and extract a release tarball
+# curl -L follows redirects; sha256sum -c verifies integrity before extracting
 VERSION="2.3.1"
 curl -Lo /tmp/app.tar.gz "https://releases.example.com/app-\${VERSION}.tar.gz"
 curl -Lo /tmp/app.tar.gz.sha256 "https://releases.example.com/app-\${VERSION}.tar.gz.sha256"
 sha256sum -c /tmp/app.tar.gz.sha256 && tar -xzf /tmp/app.tar.gz -C /opt/app/
-\`\`\``,
+
+# Rotate old logs: compress logs older than 7 days, delete compressed logs older than 30
+find /var/log/myapp -name "*.log" -mtime +7 -not -name "*.gz" -print0 \\
+  | xargs -0 gzip -9
+find /var/log/myapp -name "*.log.gz" -mtime +30 -delete
+
+# Deploy to multiple servers: rsync app and restart service in parallel
+cat servers.txt | xargs -P4 -I{} sh -c \\
+  'rsync -az ./dist/ {}:/var/www/app/ && ssh {} "sudo systemctl restart myapp"'
+\`\`\`
+
+## Common Mistakes
+
+1. **rsync trailing slash confusion** — \`rsync /src/dir/ /dest/\` vs \`rsync /src/dir /dest/\` produce different results. Always verify with \`--dry-run\` first
+2. **curl without \`-f\`** — curl exits 0 on a 404 response. Use \`-f\` or check \`-w "%{http_code}"\` in scripts
+3. **jq without \`-r\`** — JSON string quoting breaks downstream commands. Always use \`-r\` for string output
+4. **find \`-exec\` with \`\\;\` on many files** — spawns one process per file. Use \`+\` for batch processing instead
+5. **Not verifying tar archives** — always run \`tar -tzf archive.tar.gz\` to verify before extracting or distributing`,
           interviewQuestions: [
             {
               question: "How do you delete all files in /tmp older than 7 days without deleting directories?",
@@ -741,7 +1352,13 @@ Safe usage patterns:
           tags: ["bash", "variables", "arrays", "loops", "functions", "conditionals", "exit-codes"],
           content: `## Bash Scripting Fundamentals
 
-Every Bash script should start with a shebang and a description:
+Bash (Bourne Again SHell) is the glue language of DevOps. It is already installed on every Linux server and macOS machine, needs no runtime or dependencies, and is the native language of the shell environment you're already working in. For automation tasks that orchestrate other tools (docker, kubectl, terraform, git), Bash is often the simplest and most direct choice.
+
+The right mental model: a Bash script is a recorded sequence of interactive shell commands. Everything you can type at a prompt, you can put in a script. The difference is that scripts add variables, conditionals, loops, and functions to make those commands dynamic and reusable.
+
+### The Shebang: How the Kernel Runs Scripts
+
+Every script should start with a shebang line:
 
 \`\`\`bash
 #!/usr/bin/env bash
@@ -749,86 +1366,202 @@ Every Bash script should start with a shebang and a description:
 # Usage: ./deploy.sh <env> <version>
 \`\`\`
 
-Using \`#!/usr/bin/env bash\` rather than \`#!/bin/bash\` is more portable — it finds bash in your PATH regardless of installation location.
+When you run \`./deploy.sh\`, the kernel reads the first two bytes: if they are \`#!\` (hex 23 21), the kernel uses the rest of the line as the interpreter. The shebang is not a Bash comment — it is a kernel directive.
+
+**\`#!/usr/bin/env bash\` vs \`#!/bin/bash\`:**
+- \`#!/bin/bash\` hardcodes the path to bash. Fails on systems where bash is at \`/usr/local/bin/bash\` (e.g., macOS with Homebrew bash)
+- \`#!/usr/bin/env bash\` searches \`PATH\` for \`bash\`, finding the right version regardless of where it is installed
+- Always use \`env\` for portability in scripts you share across teams
+
+Without a shebang, the script runs under \`/bin/sh\`, which may be dash (not bash) on Ubuntu/Debian systems. Bash-specific syntax (\`[[ ]]\`, arrays, \`declare -A\`) will fail under sh.
 
 ---
 
 ## Variables
 
+Bash variables are untyped by default — everything is a string until you use arithmetic context.
+
 \`\`\`bash
-# Assignment: no spaces around =
-NAME="production"
-PORT=8080
-TIMESTAMP=\$(date +%Y%m%d_%H%M%S)   # command substitution
+# Assignment: NO spaces around = (spaces make Bash interpret it as a command)
+NAME="production"          # string
+PORT=8080                  # still a string, but can be used arithmetically
+TIMESTAMP=\$(date +%Y%m%d_%H%M%S)   # command substitution — runs date and captures output
 
-# Referencing: use \${} for clarity
-echo "Deploying to \${NAME} on port \${PORT}"
+# Referencing: always use double quotes around variable references
+# Without quotes: word splitting and glob expansion happen on the value
+echo "Deploying to \${NAME} on port \${PORT}"   # \${} is clearer when adjacent to text
+echo "App: \${NAME}v2"                           # without {} this would look for $NAMEv2
 
-# Default values
-ENV=\${1:-"staging"}                     # use first arg, default to staging
-DB_HOST=\${DB_HOST:-"localhost"}          # use env var, default to localhost
+# Variable expansion modifiers — extremely useful for default values and validation:
+ENV=\${1:-"staging"}             # use \$1 if set and non-empty, else use "staging"
+DB_HOST=\${DB_HOST:-"localhost"} # env var if set, else default (safe default for dev)
+DB_HOST=\${DB_HOST:="localhost"} # same + also ASSIGN the default to the variable
+REQUIRED=\${REQUIRED:?"ERROR: REQUIRED must be set"}  # exit with error if unset/empty
+LENGTH=\${#NAME}                 # length of the string value of NAME
 
-# Read-only variables
+# Read-only variables: prevent accidental reassignment
 readonly LOG_DIR="/var/log/myapp"
+readonly SCRIPT_VERSION="1.0.0"
 
-# Environment variables (export to child processes)
+# Export: make the variable visible to child processes (subshells, commands run from script)
+# Without export, variables are local to the current shell
 export APP_ENV="production"
+export DATABASE_URL="postgresql://prod-db:5432/myapp"
+\`\`\`
+
+### Variable Expansion for String Manipulation
+
+Bash has built-in string operations that avoid spawning external processes (sed, awk):
+
+\`\`\`bash
+FILE="deploy-v2.3.1-linux-amd64.tar.gz"
+
+# String length
+echo "\${#FILE}"              # 38
+
+# Remove shortest prefix matching pattern
+echo "\${FILE#deploy-}"       # v2.3.1-linux-amd64.tar.gz
+
+# Remove longest prefix matching pattern
+echo "\${FILE##*-}"           # amd64.tar.gz   (greedy, removes everything up to last -)
+
+# Remove shortest suffix matching pattern
+echo "\${FILE%.tar.gz}"       # deploy-v2.3.1-linux-amd64
+
+# Remove longest suffix matching pattern
+echo "\${FILE%%.*}"           # deploy-v2  (greedy, removes from first dot to end)
+
+# Find and replace first occurrence
+echo "\${FILE/linux/darwin}"  # deploy-v2.3.1-darwin-amd64.tar.gz
+
+# Find and replace ALL occurrences
+echo "\${FILE//-/_}"          # deploy_v2.3.1_linux_amd64.tar.gz  (all hyphens to underscores)
+
+# Uppercase / lowercase (Bash 4+)
+echo "\${FILE^^}"             # DEPLOY-V2.3.1-LINUX-AMD64.TAR.GZ  (all uppercase)
+echo "\${FILE,,}"             # deploy-v2.3.1-linux-amd64.tar.gz  (all lowercase)
+echo "\${FILE^}"              # Deploy-...  (first char uppercase only)
+
+# Substring: \${var:offset:length}
+echo "\${FILE:7:6}"           # v2.3.1  (start at position 7, take 6 chars)
+echo "\${FILE: -6}"           # tar.gz  (last 6 chars — note space before -)
 \`\`\`
 
 ### Arrays
 
 \`\`\`bash
-# Indexed array
+# Indexed array (Bash 3+)
 SERVERS=("web01" "web02" "web03")
 echo "\${SERVERS[0]}"           # first element: web01
-echo "\${SERVERS[@]}"           # all elements
+echo "\${SERVERS[-1]}"          # last element: web03 (negative indexing)
+echo "\${SERVERS[@]}"           # ALL elements as separate words — ALWAYS quote!
 echo "\${#SERVERS[@]}"          # count: 3
+echo "\${!SERVERS[@]}"          # indices: 0 1 2
 
-# Append to array
+# Append to array (not concatenate — this adds a new element)
 SERVERS+=("web04")
+# Append multiple
+SERVERS+=("db01" "db02")
 
-# Iterate
-for server in "\${SERVERS[@]}"; do
-  echo "Checking \$server"
+# CRITICAL: always quote "\${SERVERS[@]}" in loops
+# Without quotes, array elements with spaces are split
+for server in "\${SERVERS[@]}"; do   # CORRECT: each element intact
+  ssh "\$server" "uptime"
 done
 
-# Slice: elements 1 and 2
+for server in \${SERVERS[@]}; do     # WRONG: spaces in names would break this
+  ssh "\$server" "uptime"
+done
+
+# Slice: elements starting at index 1, count 2
 echo "\${SERVERS[@]:1:2}"       # web02 web03
 
-# Associative array (Bash 4+)
+# Associative arrays (Bash 4+ — like hash maps / dicts)
 declare -A CONFIG
 CONFIG["host"]="db.prod.internal"
 CONFIG["port"]="5432"
-echo "\${CONFIG[host]}"
+CONFIG["database"]="myapp"
+
+echo "\${CONFIG[host]}"          # db.prod.internal
+echo "\${!CONFIG[@]}"            # all keys: host port database
+echo "\${CONFIG[@]}"             # all values
+
+# Iterate over associative array
+for key in "\${!CONFIG[@]}"; do
+  echo "\$key = \${CONFIG[\$key]}"
+done
+
+# Common mistake: single-element assignment looks like array but isn't
+WRONG=(web01)       # This creates an array with one element
+RIGHT="web01"       # This is just a string
+
+# Read a file into an array (Bash 4+)
+mapfile -t LINES < /etc/hosts
+echo "Lines: \${#LINES[@]}"
 \`\`\`
 
 ---
 
 ## Arithmetic
 
-\`\`\`bash
-# (( )) for integer arithmetic
-COUNT=0
-((COUNT++))
-((COUNT += 10))
-echo \$COUNT    # 11
+Bash only does integer arithmetic natively. For floating-point, delegate to \`bc\` or \`awk\`.
 
-# Arithmetic in conditions
+\`\`\`bash
+# (( )) for integer arithmetic — no dollar sign needed inside
+COUNT=0
+((COUNT++))           # increment (post-increment)
+((COUNT += 10))       # add 10
+((COUNT *= 2))        # multiply by 2
+echo \$COUNT           # 22
+
+# Arithmetic in conditions: (( )) returns exit code based on result
+# (( 0 )) = exit code 1 (false), (( non-zero )) = exit code 0 (true)
 if (( PORT > 1024 )); then
-  echo "Unprivileged port"
+  echo "Unprivileged port (no root needed)"
 fi
 
-# \$(( )) for arithmetic expansion
-TOTAL=\$((100 * 1024 * 1024))   # 104857600
+if (( COUNT % 2 == 0 )); then
+  echo "\$COUNT is even"
+fi
 
-# bc for floating-point
+# \$(( )) for arithmetic expansion — assigns result to variable
+TOTAL=\$((100 * 1024 * 1024))   # 104857600 (100 MB in bytes)
+HALF=\$((TOTAL / 2))
+PERCENT=\$((COUNT * 100 / TOTAL))
+
+# TRAP: (( x-- )) when x=1 returns exit code 1 (value is 0 = false)
+# This triggers set -e! Use: (( x-- )) || true
+COUNT=1
+((COUNT--)) || true   # safe decrement when set -e is active
+
+# bc for floating-point arithmetic
+# scale=2 means 2 decimal places
 AVG=\$(echo "scale=2; \$TOTAL / 3" | bc)
 echo "\$AVG"
+
+# awk for floating-point (often faster and more portable than bc)
+AVG=\$(awk "BEGIN { printf \"%.2f\", \$TOTAL / 3 }")
+
+# Hex and octal
+echo \$((0xFF))     # 255 — hex to decimal
+echo \$((0777))     # 511 — octal to decimal
+printf "%x\n" 255  # ff  — decimal to hex
 \`\`\`
 
 ---
 
 ## Conditionals
+
+### [[ ]] vs [ ] vs test — Why [[ ]] Wins
+
+\`[[ ]]\` is a Bash keyword (not a process), offering significant advantages:
+- No word splitting or glob expansion — unquoted \`\$var\` is safe
+- Supports \`=~\` for regex matching
+- Supports \`&&\` and \`\|\|\` directly inside without short-circuit issues
+- \`<\` and \`>\` for string comparison work without escaping
+- Pattern matching with \`==\` uses glob syntax
+
+\`[ ]\` is the POSIX test command — portable to \`sh\` but fragile with unquoted variables.
 
 \`\`\`bash
 # [[ ]] is the modern Bash test — prefer it over [ ] or test
@@ -841,15 +1574,18 @@ else
   exit 1
 fi
 
-# File tests
-if [[ -f "/etc/myapp/config.yaml" ]]; then echo "Config exists"; fi
-if [[ -d "/var/log/myapp" ]]; then echo "Log dir exists"; fi
+# File tests — most common in DevOps scripts
+if [[ -f "/etc/myapp/config.yaml" ]]; then echo "File exists"; fi
+if [[ -d "/var/log/myapp" ]]; then echo "Directory exists"; fi
 if [[ -r "\$FILE" ]]; then echo "File is readable"; fi
-if [[ -s "\$FILE" ]]; then echo "File is not empty"; fi
-if [[ -x "\$SCRIPT" ]]; then echo "Script is executable"; fi
+if [[ -w "\$FILE" ]]; then echo "File is writable"; fi
+if [[ -x "\$SCRIPT" ]]; then echo "File is executable"; fi
+if [[ -s "\$FILE" ]]; then echo "File is not empty (size > 0)"; fi
+if [[ -L "\$PATH" ]]; then echo "Is a symbolic link"; fi
+if [[ -e "\$PATH" ]]; then echo "Exists (any type)"; fi
 
 # String tests
-if [[ -z "\$VAR" ]]; then echo "Empty string"; fi
+if [[ -z "\$VAR" ]]; then echo "Empty string (zero length)"; fi
 if [[ -n "\$VAR" ]]; then echo "Non-empty string"; fi
 if [[ "\$STR" =~ ^[0-9]+\$ ]]; then echo "Is a number"; fi   # regex match
 

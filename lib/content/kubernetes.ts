@@ -198,82 +198,241 @@ Total time in a healthy cluster: typically 5–30 seconds depending on image pul
 
 ## Why Pods, Not Containers?
 
-Kubernetes doesn't schedule containers directly — it schedules **Pods**. A Pod is a group of one or more containers that:
-- Share a **network namespace** (same IP address, same localhost)
-- Share **storage volumes**
-- Are always scheduled together on the same node
+Kubernetes doesn't schedule containers directly — it schedules **Pods**. Understanding why requires understanding what a Pod actually is at the OS level.
 
-The most common pattern is **one container per pod**. Multi-container pods use the **sidecar pattern**: a main container plus helpers (log shipper, proxy, secrets agent).
+A Pod is a group of one or more containers that share:
+- A **network namespace** — the same IP address and the same loopback interface (localhost). If container A in the pod listens on port 3000, container B can connect to it via \`localhost:3000\`.
+- An **IPC namespace** — containers can communicate via POSIX shared memory and semaphores.
+- Optionally a **PID namespace** — containers can see each other's processes (useful for debugging tools).
+- **Storage volumes** — volumes are defined at the Pod level and mounted into individual containers.
+
+### The Sidecar Pattern — Why Multiple Containers Per Pod
+
+The most common pattern is **one container per pod** for simplicity. But the sidecar pattern is where multi-container pods shine:
+
+\`\`\`
+Pod: payments-api
+├── Container: payments-api       ← main business logic
+├── Container: envoy-proxy        ← intercepts all network traffic (Istio)
+└── Container: vault-agent        ← fetches secrets from Vault, writes to shared volume
+\`\`\`
+
+These sidecars MUST be in the same pod because:
+- The Envoy proxy needs to intercept the main container's network traffic — only possible if they share a network namespace.
+- The Vault agent needs to write secrets to a volume that the main container reads — only possible if they share volume mounts.
+
+**Airbnb, Lyft, Uber** all use Istio's Envoy sidecar pattern. Netflix uses sidecar containers for their Metaflow observability agent.
+
+### Init Containers
+
+Init containers run to completion BEFORE any regular containers start. They're perfect for:
 
 \`\`\`yaml
-# Minimal pod manifest
+spec:
+  initContainers:
+  - name: wait-for-db
+    image: busybox
+    # Wait until PostgreSQL is accepting connections before the app starts
+    command: ['sh', '-c', 'until nc -z postgres-service 5432; do echo waiting; sleep 2; done']
+  - name: run-migrations
+    image: myapp:v2
+    # Run database migrations before the API server starts
+    command: ['python', 'manage.py', 'migrate']
+  containers:
+  - name: api
+    image: myapp:v2
+    # Only starts after BOTH init containers succeed
+\`\`\`
+
+### Pod Lifecycle Phases
+
+Understanding lifecycle phases is essential for debugging:
+
+\`\`\`
+Pending → ContainerCreating → Running → Succeeded / Failed / Unknown
+
+Pending:          Pod accepted by Kubernetes, but not yet scheduled or image not pulled
+ContainerCreating: Pod scheduled to a node, pulling image, setting up volumes/networking
+Running:          At least one container is running
+Succeeded:        All containers exited with code 0 (for Jobs)
+Failed:           All containers have exited, at least one with non-zero exit code
+Unknown:          Node communication lost — kubelet unreachable for > node-monitor-grace-period (40s default)
+\`\`\`
+
+\`\`\`bash
+# Why is a pod Pending? Check conditions and events
+kubectl describe pod <name>
+# Look for: "0/3 nodes are available: 3 Insufficient cpu"
+# Or: "0/3 nodes are available: node(s) had taint"
+# Or: "PVC not bound"
+\`\`\`
+
+## A Production-Grade Pod Manifest
+
+\`\`\`yaml
 apiVersion: v1
-kind: Pod
+kind: Pod              # most often you'd use a Deployment, not bare Pod
 metadata:
   name: nginx
+  namespace: production
   labels:
-    app: nginx
-    tier: frontend
+    app: nginx          # Services use this to find the pod
+    tier: frontend      # custom label for your organization
+    version: "1.25"     # useful for canary traffic routing
+  annotations:
+    prometheus.io/scrape: "true"    # Prometheus autodiscovery
+    prometheus.io/port: "9113"      # which port to scrape
+    git-commit: "abc1234"           # audit trail
 spec:
   containers:
   - name: nginx
-    image: nginx:1.25
+    image: nginx:1.25           # always pin a specific tag, not :latest
     ports:
-    - containerPort: 80
+    - containerPort: 80         # informational only — does NOT open a firewall
     resources:
       requests:
-        memory: "64Mi"
-        cpu: "250m"
+        memory: "64Mi"          # scheduler uses this to find a fitting node
+        cpu: "250m"             # 250 millicores = 0.25 CPU cores
       limits:
-        memory: "128Mi"
-        cpu: "500m"
+        memory: "128Mi"         # container killed (OOMKilled) if it exceeds this
+        cpu: "500m"             # container throttled (not killed) if it exceeds this
 \`\`\`
 
 \`\`\`bash
 kubectl apply -f pod.yaml
 kubectl get pods
-kubectl describe pod nginx     # full details including events
-kubectl logs nginx             # container stdout
-kubectl exec -it nginx -- bash # shell into the container
-kubectl delete pod nginx
+kubectl describe pod nginx       # full details including events (start here for debugging)
+kubectl logs nginx               # container stdout/stderr
+kubectl logs nginx -f            # follow (stream) logs in real time
+kubectl logs nginx --previous    # logs from the previous (crashed) container
+kubectl exec -it nginx -- bash   # shell into the container
+kubectl delete pod nginx         # terminates immediately (no grace period with bare pods)
 \`\`\`
 
-## Labels and Selectors
+## Labels and Selectors — How Kubernetes Connects Resources
 
-Labels are key-value pairs attached to any Kubernetes object. They're how Services find pods, how Deployments track their pods, and how you query the cluster.
+Labels are key-value pairs attached to any Kubernetes object. They are the primary mechanism by which Kubernetes objects find each other.
 
+**Two types of selectors:**
+
+**Equality-based** (simple match):
 \`\`\`bash
-# Query by label
-kubectl get pods -l app=nginx
-kubectl get pods -l "tier in (frontend,backend)"
-kubectl get pods -l app=nginx,tier=frontend  # AND
-
-# Add a label to a running pod
-kubectl label pod nginx version=v2
-
-# Remove a label
-kubectl label pod nginx version-
+kubectl get pods -l app=nginx              # app equals "nginx"
+kubectl get pods -l app!=nginx             # app does NOT equal "nginx"
+kubectl get pods -l app=nginx,tier=frontend  # AND: both must match
 \`\`\`
 
-## Namespaces: Logical Clusters
+**Set-based** (IN, NOTIN, EXISTS):
+\`\`\`bash
+kubectl get pods -l "tier in (frontend,backend)"   # tier is frontend OR backend
+kubectl get pods -l "env notin (dev,test)"         # env is NOT dev and NOT test
+kubectl get pods -l "gpu"                          # label "gpu" exists (any value)
+\`\`\`
 
-Namespaces partition a physical cluster into virtual ones. Use them to separate environments (dev/staging) or teams.
+### How Services Use Label Selectors
+
+This is the critical mechanic to understand. A Service doesn't reference pods by name — it uses a label selector to dynamically find matching pods:
+
+\`\`\`yaml
+# Service with selector:
+kind: Service
+spec:
+  selector:
+    app: nginx          # finds ALL pods with this label, routes traffic to them
+    tier: frontend      # AND this label (both must match)
+\`\`\`
+
+When a pod is added or removed, the Service automatically updates its endpoint list. This is how Kubernetes achieves load balancing without static IP configuration.
+
+**Practical tip:** If a Service has no endpoints (no traffic going to pods), the #1 cause is a label mismatch between the Service selector and the pod labels. Always verify with:
+\`\`\`bash
+kubectl get endpoints my-service      # shows pod IPs included in the service
+kubectl get pods --show-labels        # verify pod labels match the selector
+\`\`\`
+
+## Namespaces: Team and Environment Isolation
+
+Namespaces partition a physical cluster into logical virtual clusters. They provide:
+- **Name scoping**: Two namespaces can each have a pod named "postgres" — no conflict
+- **RBAC scope**: Roles and RoleBindings are namespace-scoped
+- **Network Policy scope**: NetworkPolicies are namespace-scoped
+- **Resource quotas**: Limit CPU/memory/pods per namespace
 
 \`\`\`bash
 kubectl get namespaces
 # NAME              STATUS
-# default           Active   ← where you work by default
-# kube-system       Active   ← Kubernetes internal components
-# kube-public       Active   ← publicly readable config
-# kube-node-lease   Active   ← node heartbeats
+# default           Active   ← where you work if no namespace is specified
+# kube-system       Active   ← Kubernetes internal components (CoreDNS, kube-proxy)
+# kube-public       Active   ← publicly readable config (cluster-info)
+# kube-node-lease   Active   ← node heartbeat Lease objects (performance optimization)
 
 # Create and use namespaces
 kubectl create namespace team-payments
 kubectl get pods -n team-payments
-kubectl get pods --all-namespaces    # or -A
+kubectl get pods --all-namespaces    # or -A — see everything in the cluster
 
-# Set default namespace for your session
+# Set a default namespace for your kubectl session
 kubectl config set-context --current --namespace=team-payments
+\`\`\`
+
+### When to Use Multiple Namespaces
+
+**Team isolation** (most common in enterprise):
+\`\`\`
+cluster
+├── namespace: team-payments      # payments team owns this
+├── namespace: team-inventory     # inventory team owns this
+└── namespace: team-auth          # auth team owns this
+\`\`\`
+Each team gets their own RBAC permissions, resource quotas, and network policies.
+
+**Environment isolation** (simpler but less safe):
+\`\`\`
+cluster
+├── namespace: development
+├── namespace: staging
+└── namespace: production
+\`\`\`
+Beware: a misconfigured NetworkPolicy or RBAC role in one namespace can affect others in the same cluster. For true production isolation, use separate clusters.
+
+### Resource Quotas and LimitRanges
+
+Namespaces without quotas can be starved by a runaway deployment. Apply quotas to every production namespace:
+
+\`\`\`yaml
+# ResourceQuota — hard limits for the entire namespace
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: team-payments-quota
+  namespace: team-payments
+spec:
+  hard:
+    requests.cpu: "10"          # total CPU requests across all pods
+    requests.memory: 20Gi       # total memory requests
+    limits.cpu: "20"
+    limits.memory: 40Gi
+    count/pods: "50"            # max 50 pods in this namespace
+    count/persistentvolumeclaims: "10"
+---
+# LimitRange — per-pod defaults and max/min
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: team-payments-limits
+  namespace: team-payments
+spec:
+  limits:
+  - type: Container
+    default:
+      cpu: "200m"       # default limit if not specified
+      memory: "256Mi"
+    defaultRequest:
+      cpu: "100m"       # default request if not specified
+      memory: "128Mi"
+    max:
+      cpu: "2"          # no single container can request more than this
+      memory: "4Gi"
 \`\`\`
 
 ## The Object Model
@@ -281,19 +440,50 @@ kubectl config set-context --current --namespace=team-payments
 Every Kubernetes resource has the same four top-level fields:
 
 \`\`\`yaml
-apiVersion: apps/v1   # Which API group and version
+apiVersion: apps/v1   # Which API group (v1 = core, apps/v1 = Deployments, etc.)
 kind: Deployment      # What type of object
-metadata:             # Name, namespace, labels, annotations
+metadata:             # Identity: name, namespace, labels, annotations
   name: my-app
   namespace: production
   labels:
     app: my-app
-spec:                 # Desired state (what YOU want)
+spec:                 # Desired state — what YOU declare you want
   replicas: 3
-# status:            # Current state (what K8s observes) - managed by K8s
+# status:            # Actual state — what Kubernetes observes (never write this)
 \`\`\`
 
-The **reconciliation loop**: Kubernetes constantly compares \`spec\` (desired) with \`status\` (actual). If they differ, controllers take action to close the gap. This is the core of how Kubernetes works.
+### The Reconciliation Loop — How Kubernetes Works
+
+This is the most important mental model for Kubernetes. Every Kubernetes controller runs a loop:
+
+\`\`\`
+Observe current state → Compare to desired state → Act to close the gap → Repeat
+\`\`\`
+
+For the Deployment controller:
+\`\`\`
+Desired state: 3 replicas (from spec.replicas)
+Current state: 2 pods running (from etcd + node status)
+Action:        Create 1 new pod
+\`\`\`
+
+This means Kubernetes is **self-healing by design**. If a node dies, the ReplicaSet controller detects that actual replica count dropped below desired, and creates replacement pods on healthy nodes — automatically, without human intervention.
+
+## Under the Hood — Shared Network Namespace
+
+When two containers run in the same Pod, they share a network namespace at the Linux kernel level. The pod creates a "pause container" (also called the infra container or sandbox container) first — this container holds the network namespace for the lifetime of the pod. All other containers join this namespace. The pause container is invisible in \`kubectl get pods\` but you can see it on the node with \`crictl ps\`.
+
+## Common Mistakes
+
+- **Running bare Pods in production**: A bare Pod (not managed by a Deployment) will never be rescheduled if the node it runs on fails. Always use a controller (Deployment, StatefulSet, DaemonSet).
+- **Using \`:latest\` image tags**: K8s cannot tell if the image changed, leading to inconsistent behavior across nodes. Always pin a specific version tag.
+- **Not setting resource requests**: Without requests, the scheduler cannot make good placement decisions, leading to overloaded nodes and unexpected OOM kills.
+- **Forgetting to allow DNS egress in NetworkPolicies**: A deny-all policy blocks UDP port 53 (DNS), breaking ALL service name resolution. Always add a DNS allow rule first.
+- **Label selector mismatch**: A Service with \`selector: app: nginx\` won't route to a pod labeled \`app: web-nginx\` — exact string match required.
+
+## Production Pattern
+
+At **Airbnb**, every namespace has LimitRanges with sensible defaults so engineers don't have to remember to set resource requests. Teams that exceed their ResourceQuota open a capacity request. NetworkPolicy deny-all is applied automatically to every new namespace via a Kyverno admission policy. No team can accidentally leave a port open to the whole cluster.
 `,
           interviewQuestions: [
             {
@@ -415,16 +605,43 @@ metadata:
 
 ## Why Deployments, Not Pods Directly?
 
-Never run pods directly in production. If a pod crashes, it's gone. A **Deployment** ensures a desired number of pod replicas always run. It also manages rolling updates — replacing old pods with new ones gradually to achieve zero downtime.
+Never run pods directly in production. If a bare pod crashes, it's gone forever — nobody restarts it. If the node it runs on dies, the pod is lost. A **Deployment** wraps pods in a controller that guarantees a desired number of replicas always run.
+
+### The ReplicaSet Underneath
+
+A Deployment doesn't manage pods directly — it manages a **ReplicaSet**, which manages the pods. This layering is intentional:
 
 \`\`\`
-Deployment
-└── ReplicaSet (v2)          ← current
-    ├── Pod (v2, running)
-    ├── Pod (v2, running)
-    └── Pod (v2, running)
-└── ReplicaSet (v1)          ← previous (kept for rollback)
-    └── (scaled to 0)
+Deployment (version manager)
+├── ReplicaSet v2 (current, 3 pods)      ← actively managed
+│   ├── Pod (v2, running)
+│   ├── Pod (v2, running)
+│   └── Pod (v2, running)
+└── ReplicaSet v1 (previous, 0 pods)     ← kept for rollback, scaled to 0
+\`\`\`
+
+**Why never create ReplicaSets directly?** You could, but the Deployment layer adds rolling update management, rollback capability, and revision history. The Kubernetes community considers bare ReplicaSets an anti-pattern.
+
+### How the Rolling Update Algorithm Works
+
+With \`replicas: 10\`, \`maxSurge: 2\`, \`maxUnavailable: 1\`, a rolling update proceeds:
+
+\`\`\`
+Start:         10 old pods running (v1)
+Step 1:        Create 2 new pods (v2) → 12 pods total [maxSurge allows up to 12]
+               Terminate 1 old pod (v1) → 11 pods (2 new + 9 old)
+               Wait for the 2 new pods to pass readiness probe
+Step 2:        Create 2 more new pods → 13 pods
+               Terminate 3 old pods → 10 pods (4 new + 6 old)
+               ...continue until all 10 are new version
+\`\`\`
+
+**Calculating update speed:** With maxSurge=2 and 10 replicas, each step adds 2 new pods and removes 2 old ones. A 10-pod update with a 30s readiness warmup takes roughly 5 steps × 30s = ~150 seconds minimum.
+
+**Recreate strategy** — when v1 and v2 cannot coexist (e.g., incompatible DB schema migration):
+\`\`\`yaml
+strategy:
+  type: Recreate    # terminates ALL old pods first, then creates new ones — brief outage
 \`\`\`
 
 ## A Production-Grade Deployment
@@ -485,67 +702,191 @@ spec:
           periodSeconds: 10   # gives up to 5min for slow startup
 \`\`\`
 
-## Health Probes Explained
+## Health Probes — Deep Dive
 
-**Liveness probe** — Is the container alive? If this fails 3 times, Kubernetes kills and restarts the container. Use for deadlock detection.
+The three probes serve completely different purposes and trigger different actions on failure.
 
-**Readiness probe** — Is the container ready to serve traffic? If this fails, the pod is removed from Service endpoints (no traffic sent). The container keeps running. Use for: waiting for DB connection, warming up caches.
+### Liveness Probe — Detect Deadlocks
 
-**Startup probe** — Is the container done starting? Disables liveness and readiness probes until it succeeds. Use for slow-starting applications (Java with long JVM init, loading ML models).
+**What it asks:** "Is this process alive and capable of making progress?"
+
+**What happens when it fails:** The container is killed with SIGTERM (grace period), then SIGKILL. The container is restarted. The restart count increments. This is the cause of the CrashLoopBackOff you see when probes are misconfigured.
+
+**Use for:** Deadlock detection — where the process is running but stuck. Example: a Go server where a goroutine leaked and the request queue is blocked. The process is "running" but never responds. Without a liveness probe, this pod would sit broken forever.
+
+**Critical warning — liveness probe mistakes cause flapping:**
+\`\`\`yaml
+# BAD: Liveness probe checks external dependencies
+livenessProbe:
+  httpGet:
+    path: /health-with-db-check    # checks if DB is reachable
+# Problem: DB is temporarily slow → probe fails → container restarts → more DB load → cascade
+
+# GOOD: Liveness probe checks ONLY internal process health
+livenessProbe:
+  httpGet:
+    path: /healthz    # returns 200 as long as the process is running, regardless of DB
+\`\`\`
+
+### Readiness Probe — Control Traffic Routing
+
+**What it asks:** "Is this pod ready to receive traffic right now?"
+
+**What happens when it fails:** The pod is removed from the Service's endpoint list. Traffic stops going to it. The container KEEPS RUNNING — no restart. When the probe passes again, the pod is added back to endpoints automatically.
+
+**When to use:**
+- App is warming up a cache or loading a ML model before it can respond to requests
+- App needs to establish a database connection pool
+- During graceful shutdown — mark yourself not-ready so the load balancer stops sending traffic before the container exits
+
+\`\`\`yaml
+readinessProbe:
+  httpGet:
+    path: /ready    # endpoint returns 503 if DB connection pool is not ready
+  periodSeconds: 5
+  failureThreshold: 3    # 15 seconds of failure before being removed from endpoints
+  successThreshold: 1    # 1 success → added back to Service endpoints
+\`\`\`
+
+### Startup Probe — Handle Slow-Starting Applications
+
+**What it asks:** "Has the application finished initializing?"
+
+**What happens when it passes:** Startup probe is disabled permanently. Liveness and readiness probes activate.
 
 \`\`\`
-Without startup probe:
-  App starts (takes 60s) → liveness probe fires at 10s → KILL → infinite restart loop
+Without startup probe (Java Spring Boot, 90s startup):
+  App starts... livenessProbe fires at 30s (initialDelaySeconds) → FAIL → KILL → restart → infinite loop
 
 With startup probe:
-  App starts (takes 60s) → startup probe polls every 10s, succeeds at 60s → 
-  liveness/readiness probes activate → normal operation
+  startupProbe fires at 10s, 20s, 30s, ... 90s → PASS
+  liveness/readiness probes now activate → normal operation
 \`\`\`
+
+\`\`\`yaml
+# For Elasticsearch (can take 2-3 minutes to start):
+startupProbe:
+  httpGet:
+    path: /_cluster/health
+    port: 9200
+  failureThreshold: 18    # 18 × 10s = 3 minutes max to start
+  periodSeconds: 10
+  # Once this passes, liveness/readiness take over
+\`\`\`
+
+### How the Scheduler Assigns Pods to Nodes
+
+When a pod is created with no node assigned, the scheduler runs a two-phase process:
+
+**Filtering** — eliminates nodes that cannot run the pod:
+- Insufficient CPU/memory requests
+- Node has a taint the pod doesn't tolerate
+- NodeSelector or nodeAffinity requirements don't match
+- Port conflicts
+
+**Scoring** — ranks remaining nodes by: LeastAllocated (most available resources), topology spread constraints (keep pods in different AZs), image locality (node already has the image cached).
+
+### Taints and Tolerations
+
+\`\`\`yaml
+# Mark a node so only GPU workloads schedule on it:
+# kubectl taint nodes gpu-node-1 dedicated=gpu:NoSchedule
+
+# A pod that tolerates the taint (can schedule on GPU nodes):
+spec:
+  tolerations:
+  - key: dedicated
+    operator: Equal
+    value: gpu
+    effect: NoSchedule     # NoSchedule | PreferNoSchedule | NoExecute
+  nodeSelector:
+    kubernetes.io/instance-type: p3.2xlarge    # further constrain to GPU instances
+\`\`\`
+
+**Real-world use:** Uber runs mixed node pools — some nodes have fast local NVMe SSDs tainted \`disktype=local-nvme:NoSchedule\`. Only their latency-sensitive database pods have the matching toleration. This guarantees the SSD nodes are reserved for the workloads that need them.
 
 ## Rolling Updates & Rollbacks
 
 \`\`\`bash
-# Deploy a new image version
+# Deploy a new image version (triggers rolling update)
 kubectl set image deployment/payments-api payments-api=mycompany/payments:v2.2.0
 
-# Watch the rollout
+# Watch the rollout progress in real time
 kubectl rollout status deployment/payments-api
+# Waiting for deployment rollout to finish: 1 of 3 updated replicas are available...
+# deployment "payments-api" successfully rolled out
 
-# View rollout history
+# View rollout history (shows revisions and change-cause annotations)
 kubectl rollout history deployment/payments-api
+# REVISION  CHANGE-CAUSE
+# 1         Deploy v2.0.0: initial deployment
+# 2         Deploy v2.1.0: add payment retry logic
 
 # Rollback to previous version
 kubectl rollout undo deployment/payments-api
 
-# Rollback to specific revision
-kubectl rollout undo deployment/payments-api --to-revision=3
+# Rollback to a specific revision
+kubectl rollout undo deployment/payments-api --to-revision=2
+
+# Pause a rollout mid-way (useful for canary manual inspection)
+kubectl rollout pause deployment/payments-api
+kubectl rollout resume deployment/payments-api
 \`\`\`
 
 ## Debugging Common Pod States
 
 \`\`\`bash
-# Pod not starting? Check events first
+# Pod not starting? Check events FIRST — always start here
 kubectl describe pod <pod-name>
-# Look for: Image pull errors, OOM, scheduling failures
+# The Events section at the bottom contains the root cause 90% of the time
 
 # CrashLoopBackOff: container keeps crashing
-kubectl logs <pod-name>                    # current logs
-kubectl logs <pod-name> --previous         # logs from last crash
+# "BackOff" = K8s increases delay between restarts: 10s → 20s → 40s → 5min max
+kubectl logs <pod-name>                      # current (may be empty if crashes instantly)
+kubectl logs <pod-name> --previous           # logs from the LAST crash ← check this
 
-# OOMKilled: container exceeded memory limit
+# OOMKilled: container exceeded memory limit (exit code 137 = 128 + SIGKILL)
 kubectl describe pod <pod-name> | grep -A5 "Last State"
-# Shows: Reason: OOMKilled → increase memory limit
+# Shows: Reason: OOMKilled → increase memory limit OR fix memory leak
 
 # Pending: pod can't be scheduled
 kubectl describe pod <pod-name> | grep -A10 Events
-# Common causes:
-#   Insufficient CPU/memory on all nodes
-#   No nodes match the affinity/taint requirements
-#   PVC not bound
+# Common messages:
+#   "0/3 nodes are available: 3 Insufficient cpu" → add nodes or reduce requests
+#   "0/3 nodes are available: node(s) had taint" → add a toleration
+#   "0/3 nodes are available: pod has unbound PVC" → fix the PersistentVolumeClaim
 
 # ImagePullBackOff: can't pull the image
 kubectl describe pod <pod-name>
-# Check: image name typo, registry auth (imagePullSecrets), private registry
+# Common causes: image tag typo, registry unreachable, missing imagePullSecrets
+\`\`\`
+
+## Under the Hood — ReplicaSet Controller
+
+The Deployment controller watches the Deployment object. When you change \`spec.template\`, it computes a hash of the new template and creates a new ReplicaSet with that hash. It then begins scaling up the new ReplicaSet and scaling down the old one, respecting \`maxSurge\` and \`maxUnavailable\`. The old ReplicaSet is kept at 0 replicas (not deleted) for \`revisionHistoryLimit\` revisions, enabling fast rollback — rollback just scales the old ReplicaSet back up and the current one to 0.
+
+## Common Mistakes
+
+- **Liveness probe too aggressive**: A liveness probe checking external dependencies (DB, Redis) causes cascading restarts during dependency failures. Keep liveness probes checking ONLY internal process health.
+- **No startup probe for JVM apps**: Spring Boot apps with classpath scanning take 60-120s to start. Without a startup probe, the liveness probe kills them before they finish starting — infinite CrashLoopBackOff.
+- **maxUnavailable > 0 on stateful apps**: Even "stateless" apps with in-flight requests need maxUnavailable: 0 to prevent request loss during rollout.
+- **Forgetting terminationGracePeriodSeconds**: Default is 30 seconds. If your app drains connections in 45 seconds, it will be killed mid-drain. Set this to your actual drain time plus a 15s buffer.
+
+## Production Pattern
+
+**Netflix** uses a combination of readiness probes and PreStop lifecycle hooks to achieve zero-downtime deploys:
+
+\`\`\`yaml
+lifecycle:
+  preStop:
+    exec:
+      command: ["sh", "-c", "sleep 10"]
+# When a pod is being terminated:
+# 1. K8s sets pod "Terminating" → readiness probe fails → removed from Service endpoints
+# 2. preStop hook runs (10s sleep) → ensures load balancer propagates the endpoint removal
+# 3. SIGTERM is sent to the container
+# 4. App drains in-flight requests and shuts down gracefully
+# The 10-second sleep prevents the window where LB still sends traffic to a terminating pod
 \`\`\`
 `,
           interviewQuestions: [
@@ -653,7 +994,58 @@ Other possible causes:
 
 ## StatefulSets: For Stateful Applications
 
-Deployments treat pods as interchangeable — any pod can be replaced by any other. StatefulSets give pods **stable, unique identities** that persist across restarts.
+Deployments treat pods as interchangeable cattle — any pod can be replaced by any other and the application still works. But databases, message brokers, and distributed systems are NOT interchangeable. Each node has a unique identity and specific stored data that must stay associated with it.
+
+StatefulSets give pods four guarantees Deployments cannot provide:
+
+### Guarantee 1: Stable Network Identity
+
+Each pod in a StatefulSet gets a predictable, stable hostname: \`<statefulset-name>-<ordinal>\`. With a Deployment, pod names are random hashes like \`payments-api-7d9f8b-xr9kp\` that change on every restart.
+
+- StatefulSet pod names: \`postgres-0\`, \`postgres-1\`, \`postgres-2\` — ALWAYS these names
+- Kafka brokers need to know each other's addresses. They're configured at startup: \`broker.0\`, \`broker.1\`, \`broker.2\`. With random Deployment pod names, this is impossible.
+
+### Guarantee 2: Stable Storage (One PVC Per Pod)
+
+\`volumeClaimTemplates\` creates a dedicated PVC for EACH pod, named \`<pvc-template-name>-<pod-name>\`:
+
+\`\`\`
+postgres-0 → PVC: data-postgres-0 → EBS volume in us-east-1a
+postgres-1 → PVC: data-postgres-1 → EBS volume in us-east-1b
+postgres-2 → PVC: data-postgres-2 → EBS volume in us-east-1c
+\`\`\`
+
+When \`postgres-1\` is rescheduled to a different node (due to node failure), it reconnects to \`data-postgres-1\` — its own data, preserved. A Deployment pod would get a fresh empty volume.
+
+### Guarantee 3: Ordered Deployment and Scaling
+
+Pods are created in order (0, 1, 2, ...) and each must be Running AND Ready before the next starts. This is essential for leader election:
+
+\`\`\`
+postgres-0 starts → Running+Ready → postgres-1 starts → Running+Ready → postgres-2 starts
+                  ↑
+                  Primary/master must exist before replicas can replicate from it
+\`\`\`
+
+Scaling down is in reverse order (2, 1, 0) — always remove followers before the leader.
+
+### Guarantee 4: Stable DNS via Headless Service
+
+StatefulSets require a **headless service** (\`clusterIP: None\`). This creates DNS records for EACH individual pod instead of a single virtual IP:
+
+\`\`\`
+postgres-0.postgres.production.svc.cluster.local → 10.0.1.5 (postgres-0's actual IP)
+postgres-1.postgres.production.svc.cluster.local → 10.0.1.6 (postgres-1's actual IP)
+postgres-2.postgres.production.svc.cluster.local → 10.0.1.7 (postgres-2's actual IP)
+\`\`\`
+
+A regular ClusterIP service gives you ONE virtual IP that load-balances across all pods — you can't target a specific replica. For replication, the primary needs to be addressed directly, and the DNS format above enables this.
+
+**Real-world users:**
+- **Elastic** runs Elasticsearch on StatefulSets (master-0, data-0, data-1, data-2)
+- **Cassandra** clusters use StatefulSets for stable node naming
+- **Kafka** brokers use StatefulSets (broker-0, broker-1, broker-2)
+- **PostgreSQL** with Patroni for HA streaming replication
 
 **Use StatefulSet when your app needs:**
 - Stable network identity (pod-0, pod-1, pod-2 — not random names)
@@ -707,21 +1099,54 @@ spec:
 \`\`\`
 
 This creates:
-- \`postgres-0\`, \`postgres-1\`, \`postgres-2\` (stable names)
-- \`data-postgres-0\`, \`data-postgres-1\`, \`data-postgres-2\` (dedicated PVCs)
-- DNS: \`postgres-0.postgres.default.svc.cluster.local\`
+- \`postgres-0\`, \`postgres-1\`, \`postgres-2\` (stable names that survive restarts)
+- \`data-postgres-0\`, \`data-postgres-1\`, \`data-postgres-2\` (dedicated PVCs, NOT deleted when pods restart)
+- DNS: \`postgres-0.postgres.default.svc.cluster.local\` (individual pod addressability)
+
+The headless service is critical — without \`clusterIP: None\`, the DNS records for individual pods would not be created, and you'd only get the virtual load-balancing IP.
+
+### PodDisruptionBudgets — Protecting StatefulSets During Maintenance
+
+When you run \`kubectl drain\` on a node for maintenance or a cluster upgrade, Kubernetes evicts pods. Without a PodDisruptionBudget, it could evict ALL StatefulSet pods simultaneously — taking your database cluster offline.
+
+\`\`\`yaml
+# Ensure at least 2 PostgreSQL pods are always running during disruptions
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: postgres-pdb
+  namespace: production
+spec:
+  minAvailable: 2          # always keep at least 2 pods running
+  # OR: maxUnavailable: 1  # allow at most 1 pod to be unavailable
+  selector:
+    matchLabels:
+      app: postgres
+\`\`\`
+
+With this PDB:
+- A node drain that would take postgres-0 down checks the PDB: 2/3 pods still available → OK
+- A node drain that would take postgres-1 down when postgres-0 is already down: 1/3 pods available → BLOCKED until postgres-0 is restored
+- Kubernetes will wait, not skip — giving you safety during cluster upgrades
+
+**Real-world:** When EKS upgrades node groups, each node is drained one by one. PDBs prevent the upgrade from creating database downtime by blocking node drains that would violate the minimum availability requirement.
 
 ## DaemonSets: One Pod Per Node
 
-A DaemonSet ensures one pod runs on every node (or a subset matching a node selector). When new nodes join the cluster, the DaemonSet pod is automatically created there.
+A DaemonSet ensures **exactly one pod runs on every node** (or a subset matching a node selector). When new nodes join the cluster, the DaemonSet controller automatically creates a pod on them. When nodes are removed, the pods are garbage collected.
+
+### Why DaemonSets, Not Deployments With High Replica Count?
+
+With a 100-node cluster, a Deployment with \`replicas: 100\` doesn't guarantee one pod per node. The scheduler places pods where resources are available. You might end up with 50 pods on 20 nodes and 0 pods on 80 nodes. A DaemonSet guarantees **one and only one pod per node**.
 
 **Use DaemonSets for:**
-- Log collectors (Fluentd, Filebeat, Promtail)
-- Monitoring agents (Datadog Agent, Prometheus Node Exporter)
-- Network plugins (CNI plugins, Cilium)
-- Security scanners (Falco)
+- **Log collectors** — Fluentd, Filebeat, Promtail need to read \`/var/log\` on the **specific node** where application containers write their logs. A pod on node-2 cannot read logs written to node-1's filesystem.
+- **Monitoring agents** — Datadog Agent, Prometheus Node Exporter collect metrics about the node they run on (CPU, memory, disk, network interfaces)
+- **Network plugins (CNI)** — Calico, Cilium, Flannel must run on every node to set up pod networking
+- **Storage drivers** — CSI node drivers (EBS, EFS) must be present on every node where pods might mount volumes
+- **Security tools** — Falco (runtime security) monitors syscalls from all containers on the node
 
-**Real-world:** Datadog runs its agent as a DaemonSet on every node in your cluster. Netflix runs their Metaflow log collection as a DaemonSet.
+**Real-world:** Datadog runs its agent as a DaemonSet on every node. Netflix runs their Metaflow log collection as a DaemonSet. All CNI plugins (the core of Kubernetes networking) are DaemonSets — they must be present on every node before any pods can get network connectivity.
 
 \`\`\`yaml
 apiVersion: apps/v1
@@ -733,6 +1158,10 @@ spec:
   selector:
     matchLabels:
       name: fluentd
+  updateStrategy:
+    type: RollingUpdate          # updates one node at a time (vs Recreate which kills all first)
+    rollingUpdate:
+      maxUnavailable: 1          # at most 1 node's fluentd is down during update
   template:
     metadata:
       labels:
@@ -740,24 +1169,64 @@ spec:
     spec:
       tolerations:
       - key: node-role.kubernetes.io/control-plane
-        effect: NoSchedule            # run on control plane nodes too
+        effect: NoSchedule        # also run on control plane nodes (for control plane log collection)
+      - key: node.kubernetes.io/not-ready
+        effect: NoExecute         # start even on nodes that aren't fully ready yet
+        tolerationSeconds: 300
+      # Priority class: ensures fluentd is NOT evicted when a node is under memory pressure
+      priorityClassName: system-node-critical
       containers:
       - name: fluentd
         image: fluent/fluentd-kubernetes-daemonset:v1
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "200Mi"
+          limits:
+            memory: "500Mi"         # limit is set; if exceeded, fluentd is OOMKilled (not app pods)
         volumeMounts:
         - name: varlog
-          mountPath: /var/log
+          mountPath: /var/log       # read host's /var/log directory
         - name: varlibdockercontainers
           mountPath: /var/lib/docker/containers
-          readOnly: true
+          readOnly: true            # read-only: fluentd only reads, never writes
       volumes:
       - name: varlog
         hostPath:
-          path: /var/log
+          path: /var/log            # mount the NODE's filesystem, not a PVC
       - name: varlibdockercontainers
         hostPath:
           path: /var/lib/docker/containers
 \`\`\`
+
+### DaemonSet Update Strategies
+
+\`\`\`bash
+# Rolling update (default): updates one node at a time
+# Good for: log shippers, monitoring agents — brief gap in collection is acceptable
+
+# OnDelete: only updates when you manually delete the pod
+# Good for: CNI plugins — you control exactly when the network plugin is updated (risky operation)
+
+# Check DaemonSet rollout status:
+kubectl rollout status daemonset/fluentd -n kube-system
+# Waiting for daemon set "fluentd" rollout to finish: 2 out of 10 new pods have been updated...
+\`\`\`
+
+## Under the Hood — StatefulSet Identity
+
+When a StatefulSet pod restarts, even on a different node, Kubernetes preserves its identity through two mechanisms:
+1. The pod spec uses the ordinal index in the name — \`postgres-1\` is always \`postgres-1\`
+2. The PVC binding is stored in etcd — \`data-postgres-1\` is always bound to the same underlying storage
+
+This means if postgres-1's node fails, the new postgres-1 pod is created on a different node, but the PVC \`data-postgres-1\` is reconnected (the EBS volume is detached from the dead node and attached to the new node). The pod wakes up with its data intact.
+
+## Common Mistakes
+
+- **Using a regular ClusterIP Service instead of headless**: Without \`clusterIP: None\`, individual pod DNS records (\`postgres-0.postgres.svc...\`) are not created. Replication configurations that reference pods by hostname will fail.
+- **Deleting a StatefulSet without deleting its PVCs**: The PVCs are NOT automatically deleted. This is intentional safety — your data survives. But it means you need to manually delete PVCs if you want to reclaim storage.
+- **Forgetting PodDisruptionBudgets**: Without a PDB, a cluster upgrade can drain nodes so fast it takes down all replicas of a stateful service simultaneously.
+- **Running a database as a Deployment with shared storage**: Multiple replicas trying to write to the same EBS volume will corrupt data. Use StatefulSets with volumeClaimTemplates.
 `,
           interviewQuestions: [
             {
@@ -867,89 +1336,196 @@ Example: If you have a 100-node cluster and deploy Datadog Agent as a DaemonSet 
 
 ## Why Services Exist
 
-Pods are ephemeral — they die and get new IP addresses. A **Service** gives you a stable IP and DNS name that automatically routes to healthy pods.
+Pods are ephemeral — they die, restart, and get assigned new IP addresses. If Service A hardcodes Service B's pod IP, that IP is invalid the moment B's pod restarts. A **Service** gives you a stable virtual IP (ClusterIP) and a DNS name that automatically routes to healthy pods.
 
 \`\`\`
 Without Service:
-  Pod (10.0.1.5) → crashes → new Pod (10.0.1.23)
-  Caller has hardcoded 10.0.1.5 → broken
+  Pod B (10.0.1.5) → crashes → new Pod B (10.0.1.23)
+  Service A has hardcoded 10.0.1.5 → broken
 
 With Service:
-  Service (10.96.0.100, DNS: payments-api) → always routes to healthy pods
-  Caller uses service name → always works
+  Service B (ClusterIP: 10.96.0.100, DNS: payments-api) → always routes to healthy pods
+  Service A uses DNS name "payments-api" → always works, regardless of pod IP changes
 \`\`\`
 
-## Service Types
+## Service Types — Deep Dive
 
-### ClusterIP (default)
-Internal-only. Reachable only from within the cluster. Use for pod-to-pod communication.
+### ClusterIP (default) — Internal Only
+
+Creates a virtual IP reachable ONLY from within the cluster. kube-proxy programs iptables/IPVS rules on every node to DNAT traffic to this virtual IP into one of the pod IPs.
 
 \`\`\`yaml
 apiVersion: v1
 kind: Service
 metadata:
   name: payments-api
+  namespace: production
 spec:
-  type: ClusterIP       # default if omitted
+  type: ClusterIP             # default if omitted — internal only
   selector:
-    app: payments-api   # routes to pods with this label
+    app: payments-api         # dynamically finds pods with this label
   ports:
-  - port: 80            # service port
-    targetPort: 8080    # container port
+  - name: http                # name the port (referenced by Ingress and probes)
+    port: 80                  # port the SERVICE listens on (callers use this)
+    targetPort: 8080          # port the CONTAINER listens on (must match containerPort)
+    protocol: TCP             # TCP (default) or UDP
 \`\`\`
 
-### NodePort
-Exposes the service on a port on every node (30000–32767). Traffic to any-node-IP:nodePort reaches the service. Rarely used directly in production (use Ingress instead).
+DNS resolution within the cluster:
+\`\`\`bash
+# Short form (works within same namespace):
+curl http://payments-api/v1/payments
 
-### LoadBalancer
-Creates a cloud load balancer (AWS NLB/ELB, GCP LB). Each LoadBalancer service gets its own cloud LB = expensive at scale.
+# Full FQDN (works cross-namespace):
+curl http://payments-api.production.svc.cluster.local/v1/payments
+
+# The DNS search order adds the namespace automatically for same-namespace lookups
+# CoreDNS serves all cluster DNS queries from kube-system
+\`\`\`
+
+### NodePort — Exposes on Every Node's IP
+
+Allocates a port in the range 30000-32767 on EVERY node in the cluster. Traffic hitting any-node-IP:nodePort is forwarded to the Service.
+
+\`\`\`yaml
+spec:
+  type: NodePort
+  ports:
+  - port: 80
+    targetPort: 8080
+    nodePort: 30080    # if omitted, K8s auto-assigns a port in 30000-32767
+\`\`\`
+
+**When to use NodePort:**
+- On-premises clusters without cloud load balancers
+- Development environments (access the app via \`http://node-ip:30080\`)
+- Behind a hardware load balancer that you configure to point at the NodePorts
+
+**Why not use NodePort in production:** Each node IP is exposed. If a node is replaced, clients need to update their configuration. Use an Ingress controller (which sits in front of NodePort) or a LoadBalancer Service instead.
+
+### LoadBalancer — Cloud-Managed External Access
+
+Creates a cloud load balancer (AWS NLB, GCP CLB, Azure LB) in front of the Service. Each LoadBalancer Service gets its own cloud LB.
 
 \`\`\`yaml
 spec:
   type: LoadBalancer
-  # Result: an AWS NLB is created, you get an external IP
+  # Annotations customize the cloud LB:
+  # (AWS example — creates an NLB instead of classic ELB)
+metadata:
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled: "true"
+# Result: AWS provisions an NLB, you get an external DNS name/IP
 \`\`\`
+
+**Cost consideration:** On AWS, each NLB costs ~$16/month + data processing. A cluster with 50 microservices using LoadBalancer Services costs ~$800/month in LB fees alone. Use ONE Ingress controller instead.
+
+### ExternalName — DNS Alias to External Services
+
+Creates a CNAME record pointing outside the cluster. Use for database endpoints, external APIs.
+
+\`\`\`yaml
+spec:
+  type: ExternalName
+  externalName: mydb.us-east-1.rds.amazonaws.com
+  # In-cluster: curl http://prod-database → resolves to RDS endpoint
+  # Allows you to use a K8s service name even for external resources
+  # Can easily switch from external to internal by changing the Service type
+\`\`\`
+
+## How kube-proxy Implements Service Routing
+
+kube-proxy runs on every node and watches the API server for Service and Endpoints changes. It programs the Linux networking stack to intercept and redirect traffic.
+
+### iptables Mode (default)
+
+For each Service with 3 endpoints, kube-proxy creates iptables DNAT rules:
+
+\`\`\`bash
+# Traffic to 10.96.0.100:80 (ClusterIP) is intercepted and probabilistically redirected:
+# With 3 pods, the probability chain looks like:
+#   → 10.0.1.5:8080 with probability 1/3 (33%)
+#   → 10.0.1.6:8080 with probability 1/2 of remaining (33%)
+#   → 10.0.1.7:8080 always (33%)
+
+# See the iptables rules on a node:
+sudo iptables -t nat -L KUBE-SERVICES | grep payments
+sudo iptables -t nat -L KUBE-SVC-<hash>  # the per-service chain
+\`\`\`
+
+**Problem at scale:** iptables rules are evaluated linearly — O(n) where n is the number of endpoints. At 10,000 Services with 5 pods each = 50,000 rules per node, evaluated sequentially for every packet. This causes multi-millisecond latency increases at large scale.
+
+### IPVS Mode (recommended for large clusters)
+
+IPVS uses hash tables for O(1) lookup. Supports advanced load-balancing algorithms: round-robin, least connections, shortest expected delay, destination hashing.
+
+\`\`\`bash
+# Enable IPVS mode in kube-proxy config:
+# kube-proxy --proxy-mode=ipvs --ipvs-scheduler=lc  # least connections
+
+# See IPVS rules:
+ipvsadm -Ln | grep 10.96.0.100
+\`\`\`
+
+**At scale:** Google, Baidu, and JD.com switched to IPVS for clusters with 10,000+ Services. At 5,000 Services, IPVS reduces packet processing time from ~50ms to ~0.5ms.
 
 ## Ingress: One Load Balancer for All Services
 
-Instead of one LoadBalancer per service (expensive), use one Ingress controller that routes traffic based on hostname and path.
+Instead of one LoadBalancer per service (expensive), use one Ingress controller that routes traffic based on hostname and path. The Ingress controller is itself a Deployment with a LoadBalancer Service.
 
 \`\`\`
-Internet → AWS ALB (1 LB, cost-efficient)
+Internet → AWS ALB (1 LB, ~$16/month total)
               │
-    ┌─────────┼─────────┐
-    │         │         │
-  /api      /app      /admin
-    │         │         │
- api-svc  app-svc  admin-svc
+   ┌──────────┼───────────────┐
+   │          │               │
+api.company.com  app.company.com  admin.company.com
+   │          │               │
+api-svc     app-svc        admin-svc (ClusterIP)
 \`\`\`
+
+### Ingress Controller Architecture
+
+The Ingress **resource** (YAML object) declares the routing rules. The Ingress **controller** is a running pod that:
+1. Watches Ingress objects in the cluster
+2. Configures an underlying reverse proxy (nginx, Envoy, HAProxy) based on those rules
+3. Provisions cloud LBs when using cloud-specific controllers (AWS ALB Ingress Controller)
+
+**Popular controllers and their use cases:**
+- **nginx** — most common, great for HTTP/HTTPS routing, rate limiting, auth
+- **Traefik** — automatic TLS via Let's Encrypt, dynamic configuration
+- **AWS ALB Ingress Controller** — provisions an AWS Application Load Balancer per Ingress, native integration with WAF and Cognito
+- **Istio Gateway** — for service mesh environments, supports gRPC, WebSocket, circuit breaking
 
 \`\`\`yaml
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: main-ingress
+  namespace: production
   annotations:
-    kubernetes.io/ingress.class: "nginx"
-    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    kubernetes.io/ingress.class: "nginx"          # which controller handles this Ingress
+    nginx.ingress.kubernetes.io/rate-limit: "100" # 100 req/sec per client IP
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"  # auto TLS cert
 spec:
+  ingressClassName: nginx       # modern way (Kubernetes 1.18+)
   tls:
   - hosts:
     - api.mycompany.com
-    secretName: api-tls-cert
+    secretName: api-tls-cert    # cert-manager creates and populates this Secret
   rules:
-  - host: api.mycompany.com
+  - host: api.mycompany.com     # matches Host: header
     http:
       paths:
-      - path: /v1
-        pathType: Prefix
+      - path: /v1               # matches URL path prefix
+        pathType: Prefix        # Prefix (starts with) | Exact | ImplementationSpecific
         backend:
           service:
-            name: payments-api
+            name: payments-api  # routes to this Service
             port:
               number: 80
       - path: /health
-        pathType: Exact
+        pathType: Exact         # exact match only — /health not /health/db
         backend:
           service:
             name: healthcheck
@@ -957,41 +1533,77 @@ spec:
               number: 8080
 \`\`\`
 
-## How Services Work (kube-proxy)
+### How DNS Resolves Service Names Within a Cluster
 
-kube-proxy runs on every node and watches the API server for Service and Endpoints changes. It programs **iptables rules** (or IPVS) to redirect traffic:
+CoreDNS runs as a Deployment in \`kube-system\` and is the DNS server for all pods. It is configured with the cluster domain (default: \`cluster.local\`).
+
+\`\`\`
+Pod DNS resolution for "payments-api":
+1. Search domains (from /etc/resolv.conf in the pod):
+   - payments-api.production.svc.cluster.local → hit! → return ClusterIP
+   - payments-api.svc.cluster.local → (if not found above)
+   - payments-api.cluster.local → (if not found above)
+   - payments-api. → external DNS lookup (if none of above match)
+
+2. For cross-namespace: "payments-api.production" →
+   payments-api.production.svc.cluster.local → return ClusterIP
+\`\`\`
 
 \`\`\`bash
-# When you hit the ClusterIP (10.96.0.100:80), iptables rewrites it:
-# → 10.0.1.5:8080 (pod 1) with probability 1/3
-# → 10.0.1.6:8080 (pod 2) with probability 1/2
-# → 10.0.1.7:8080 (pod 3) with probability 1
-
-# See the iptables rules on a node:
-sudo iptables -t nat -L KUBE-SERVICES | grep payments
+# Verify DNS resolution from within a pod:
+kubectl exec -it debug-pod -- nslookup payments-api
+# Server:    10.96.0.10          ← CoreDNS ClusterIP
+# Address:   10.96.0.10#53
+# Name:      payments-api.production.svc.cluster.local
+# Address:   10.96.45.100        ← Service ClusterIP
 \`\`\`
 
 ## Debugging Service Connectivity
 
 \`\`\`bash
-# Step 1: Can you reach the service DNS?
+# Step 1: Can the pod resolve the service DNS name?
 kubectl exec -it debug-pod -- nslookup payments-api
 kubectl exec -it debug-pod -- nslookup payments-api.default.svc.cluster.local
+# If this fails: CoreDNS issue — check kubectl get pods -n kube-system | grep coredns
 
-# Step 2: Is the service sending traffic to pods?
+# Step 2: Are there endpoints? (Is the selector matching pods?)
 kubectl get endpoints payments-api
-# If ENDPOINTS is <none>, your selector doesn't match any pods
+# If ENDPOINTS shows <none>: selector mismatch — most common cause
+kubectl get pods --show-labels | grep payments-api  # compare with service selector
 
-# Step 3: Do the pod labels match the service selector?
-kubectl get pods -l app=payments-api  # should show your pods
+# Step 3: Are the pods passing their readiness probes?
+kubectl get pods -l app=payments-api
+# READY column: 0/1 means readiness probe failing → pod excluded from endpoints
 
-# Step 4: Can you reach the pod directly?
-kubectl exec -it debug-pod -- curl 10.0.1.5:8080
+# Step 4: Can you reach the pod directly (bypass service routing)?
+kubectl get pod my-pod -o jsonpath='{.status.podIP}'
+kubectl exec -it debug-pod -- curl <pod-ip>:8080
+# If direct works but service doesn't: kube-proxy issue or NetworkPolicy blocking traffic
 
 # Step 5: Check service port mapping
 kubectl describe service payments-api
-# Verify Port and TargetPort match your container
+# Verify Port (service port), TargetPort (container port), and NodePort if applicable
 \`\`\`
+
+## Under the Hood — Endpoints and EndpointSlices
+
+When you create a Service, Kubernetes automatically creates an **Endpoints** object (or EndpointSlices in newer versions) that contains the IP addresses of all pods matching the selector that have passed their readiness probe. kube-proxy watches these Endpoints objects (not the pods directly) to update its iptables/IPVS rules.
+
+This is why:
+- A pod that fails its readiness probe is automatically removed from Service traffic (the Endpoints controller removes its IP)
+- A pod being terminated gracefully stops receiving traffic before it shuts down (if you send a SIGTERM, the pod is first removed from endpoints, then given time to drain)
+
+## Common Mistakes
+
+- **Selector mismatch between Service and Deployment**: The Service has \`app: payments-api\` but the Deployment's pod template has \`app: payments_api\` (underscore vs hyphen). No endpoints are populated.
+- **Port vs TargetPort confusion**: \`port: 80\` is the Service port (what callers use). \`targetPort: 8080\` is the container port (what the app listens on). They don't have to match.
+- **Using NodePort when Ingress is available**: NodePort works but exposes every node's IP to the internet and requires external load balancer configuration. Use Ingress instead.
+- **One LoadBalancer Service per microservice**: At 50 microservices × $16/month = $800/month vs one Ingress controller.
+- **Forgetting the headless service for StatefulSets**: Without \`clusterIP: None\`, individual pod DNS records are not created. StatefulSet pods cannot be addressed individually.
+
+## Production Pattern
+
+**Airbnb's service routing** uses NGINX Ingress with rate limiting and OIDC authentication at the Ingress layer. Every microservice uses a ClusterIP Service internally. The only Services with external exposure are through Ingress rules with TLS termination, WAF integration, and request logging. Individual engineers never have access to create LoadBalancer Services in production — only ClusterIP and Ingress resources are permitted via OPA/Gatekeeper policies.
 `,
           interviewQuestions: [
             {
@@ -1074,27 +1686,49 @@ Most common root cause: **selector mismatch** — the service has \`app: my-app\
 
 ## The Problem: Kubernetes Is Open By Default
 
-By default, every pod in a Kubernetes cluster can talk to every other pod — across namespaces. If an attacker compromises your frontend pod, they can directly connect to your database pod.
-
-This is a critical security risk for:
-- **PCI DSS compliance** (payment card data must be isolated)
-- **HIPAA** (healthcare data isolation)
-- **SOC 2** (access controls)
+By default, every pod in a Kubernetes cluster can talk to every other pod — across namespaces. There is NO implicit isolation. If an attacker exploits a vulnerability in your frontend pod, they can directly connect to your database pod on port 5432.
 
 \`\`\`
-Default K8s:
-  frontend-pod → database-pod ✓
-  frontend-pod → payments-service ✓
-  frontend-pod → internal-admin-api ✓  ← dangerous!
+Default Kubernetes (no NetworkPolicies):
+  frontend-pod → database-pod:5432 ✓   ← should this be allowed? Probably not
+  frontend-pod → payments-api:8080 ✓
+  frontend-pod → internal-admin-api ✓  ← dangerous! admin APIs have no business receiving frontend traffic
+  compromised-pod → database-pod ✓     ← lateral movement attack succeeds
 \`\`\`
 
-## NetworkPolicy: Kubernetes Firewall
+This violates the **zero-trust** security model and fails compliance requirements:
+- **PCI DSS** requires cardholder data to be isolated in a separate network segment
+- **HIPAA** requires PHI systems to have strict access controls
+- **SOC 2** requires demonstrable network segmentation
 
-NetworkPolicy is a Kubernetes object that defines ingress (incoming) and egress (outgoing) rules for pods.
+### CNI Plugin Requirements — Not All CNIs Enforce NetworkPolicy
 
-**Important**: NetworkPolicy requires a CNI plugin that supports it (Calico, Cilium, Weave). The default CNI (Flannel) does NOT enforce NetworkPolicy. EKS uses VPC CNI (which needs Calico for NetworkPolicy), GKE uses its own, AKS supports Calico or Azure NetworkPolicy.
+NetworkPolicy is a Kubernetes API object, but the actual enforcement happens in the CNI plugin. If your CNI doesn't support NetworkPolicy, applying the objects does NOTHING — no enforcement, no error, just a false sense of security.
 
-### Step 1: Deny All (Zero-Trust Baseline)
+| CNI Plugin | NetworkPolicy Support |
+|------------|----------------------|
+| **Calico** | Yes — L3/L4 + Calico-specific L7 policies |
+| **Cilium** | Yes — L3/L4/L7, eBPF-based, best performance |
+| **Weave Net** | Yes |
+| **Flannel** | **NO** — policies are ignored |
+| **AWS VPC CNI** | Needs Calico or Cilium added |
+| **GKE Dataplane V2** | Yes (uses Cilium) |
+| **AKS** | Yes (Calico or Azure NetworkPolicy plugin) |
+
+Always verify your CNI supports NetworkPolicy:
+\`\`\`bash
+kubectl get daemonset -n kube-system  # look for calico-node, cilium, etc.
+\`\`\`
+
+## NetworkPolicy: How It Works Internally
+
+A NetworkPolicy selects pods via a \`podSelector\` and declares allowed ingress/egress rules. Once ANY NetworkPolicy selects a pod, that pod's traffic is restricted to what the policies explicitly permit. Pods not selected by any NetworkPolicy have no restrictions.
+
+**Additive model:** Multiple NetworkPolicies can select the same pod. The allowed traffic is the UNION of all matching policies. There is no "deny rule" — only allow rules. To deny traffic, simply don't have an allow rule for it.
+
+## Step 1: Deny All (Zero-Trust Baseline)
+
+This is the first NetworkPolicy to apply to every production namespace:
 
 \`\`\`yaml
 apiVersion: networking.k8s.io/v1
@@ -1103,17 +1737,42 @@ metadata:
   name: deny-all
   namespace: production
 spec:
-  podSelector: {}    # applies to ALL pods in this namespace
+  podSelector: {}      # empty selector = applies to ALL pods in this namespace
   policyTypes:
-  - Ingress
-  - Egress
-  # No ingress or egress rules = deny everything
+  - Ingress            # apply ingress rules
+  - Egress             # apply egress rules
+  # No ingress[] or egress[] rules defined = deny ALL ingress and egress
 \`\`\`
 
-### Step 2: Allow What's Needed
+After applying this, ALL traffic to and from pods in the production namespace is blocked. Nothing works yet — including DNS resolution. That's intentional. Now we selectively open only what's needed.
+
+## Step 2: Always Allow DNS First
+
+DNS uses UDP/TCP port 53. If you block egress port 53, pods cannot resolve any service names — everything breaks silently (curl my-service returns "Name or service not known").
 
 \`\`\`yaml
-# Allow frontend to talk to payments API
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: production
+spec:
+  podSelector: {}       # applies to ALL pods
+  policyTypes:
+  - Egress
+  egress:
+  - ports:
+    - protocol: UDP
+      port: 53          # DNS is primarily UDP
+    - protocol: TCP
+      port: 53          # DNS can also use TCP for large responses
+  # This allows ALL pods to reach CoreDNS for name resolution
+\`\`\`
+
+## Step 3: Allow Specific Application Traffic
+
+\`\`\`yaml
+# Allow frontend pods to call payments-api on port 8080
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -1122,19 +1781,19 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      app: payments-api     # this policy applies to payments pods
+      app: payments-api     # this policy applies TO payments-api pods (the receiver)
   policyTypes:
-  - Ingress
+  - Ingress                 # controls who can send TO payments-api
   ingress:
   - from:
     - podSelector:
         matchLabels:
-          app: frontend     # only allow from frontend pods
+          app: frontend     # ONLY frontend pods can send ingress traffic
     ports:
     - protocol: TCP
-      port: 8080
+      port: 8080            # only on this port
 ---
-# Allow payments API to reach postgres
+# Allow payments-api to reach postgres on port 5432
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -1143,55 +1802,115 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      app: postgres
+      app: postgres         # applies TO postgres pods
   policyTypes:
   - Ingress
   ingress:
   - from:
     - podSelector:
         matchLabels:
-          app: payments-api
+          app: payments-api # only payments-api can reach postgres
     ports:
     - protocol: TCP
       port: 5432
----
-# Allow DNS resolution (required for everything to work)
+\`\`\`
+
+Now the traffic flow is:
+\`\`\`
+frontend → payments-api:8080  ✓  (allowed by policy)
+payments-api → postgres:5432  ✓  (allowed by policy)
+frontend → postgres:5432      ✗  (no policy allows this)
+compromised-pod → postgres    ✗  (no policy allows this — lateral movement blocked)
+\`\`\`
+
+## Cross-Namespace Policies — Combined Selectors
+
+When you need to allow traffic from a different namespace, combine \`namespaceSelector\` AND \`podSelector\`:
+
+\`\`\`yaml
+# Allow Prometheus in the "monitoring" namespace to scrape metrics from production pods
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-dns
+  name: allow-prometheus-scrape
   namespace: production
-spec:
-  podSelector: {}
-  policyTypes:
-  - Egress
-  egress:
-  - ports:
-    - protocol: UDP
-      port: 53
-    - protocol: TCP
-      port: 53
-\`\`\`
-
-## Cross-Namespace Policies
-
-\`\`\`yaml
-# Allow monitoring namespace to scrape metrics from production
 spec:
   podSelector:
     matchLabels:
       app: payments-api
+  policyTypes:
+  - Ingress
   ingress:
   - from:
     - namespaceSelector:
         matchLabels:
-          purpose: monitoring   # namespace must have this label
-      podSelector:
+          purpose: monitoring    # the monitoring namespace must have this label
+      podSelector:               # AND within that namespace, only these pods
         matchLabels:
-          app: prometheus       # AND pod must have this label
+          app: prometheus
     ports:
     - port: 9090
 \`\`\`
+
+**Critical syntax note:** In the \`from\` list, entries within the SAME list item are AND conditions. Entries in SEPARATE list items are OR conditions:
+
+\`\`\`yaml
+# This is AND: must be from monitoring namespace AND have app=prometheus label
+ingress:
+- from:
+  - namespaceSelector:
+      matchLabels:
+        purpose: monitoring
+    podSelector:              # same list item → AND
+      matchLabels:
+        app: prometheus
+
+# This is OR: from monitoring namespace OR from any pod with app=prometheus label
+ingress:
+- from:
+  - namespaceSelector:        # separate list item → OR
+      matchLabels:
+        purpose: monitoring
+  - podSelector:              # separate list item → OR
+      matchLabels:
+        app: prometheus
+\`\`\`
+
+## ipBlock — Controlling External Traffic
+
+Use \`ipBlock\` to allow/deny traffic from specific CIDR ranges:
+
+\`\`\`yaml
+# Allow only internal corporate network and VPN to access the admin API
+ingress:
+- from:
+  - ipBlock:
+      cidr: 10.0.0.0/8        # corporate internal network
+  - ipBlock:
+      cidr: 192.168.1.0/24    # VPN subnet
+      except:
+      - 192.168.1.100/32      # block a specific compromised IP within the range
+\`\`\`
+
+## Under the Hood — How CNI Enforces NetworkPolicy
+
+When Calico or Cilium is the CNI, each node runs an agent (calico-node or cilium-agent) that watches NetworkPolicy objects. When a policy is applied or changed, the agent programs either:
+- **iptables rules** (Calico in standard mode) — iptables chains per namespace, per pod
+- **eBPF programs** (Cilium) — kernel-level bytecode attached to each network interface, significantly faster than iptables
+
+Every packet is evaluated against the policy rules at the kernel level before it leaves the pod's veth interface. This means enforcement is at the source, not at the destination — a compromised pod cannot even send the packet.
+
+## Common Mistakes
+
+- **Forgetting DNS egress rule**: The most common mistake. Always apply the allow-dns policy before or alongside deny-all.
+- **Using OR when you meant AND in from[] selectors**: Separate list entries are OR. Same-item namespace+pod selector is AND. Getting this wrong opens up unintended cross-namespace access.
+- **CNI doesn't support NetworkPolicy**: Using Flannel and wondering why policies don't work. Always verify CNI support before relying on NetworkPolicy for compliance.
+- **Not labeling namespaces for namespaceSelector**: If \`namespaceSelector\` references a label that no namespace has, no traffic is allowed — not even from the intended namespace.
+- **Only applying Ingress rules, forgetting Egress**: If your app needs to make outbound calls (to external APIs, databases in other namespaces), you also need egress rules.
+
+## Production Pattern
+
+**Stripe's** zero-trust networking model: every namespace gets a deny-all policy automatically via a Kyverno ClusterPolicy that watches for new namespaces and injects the baseline policies. Service-to-service communication is then opened up by the service owner as part of their deployment configuration. Prometheus scraping is handled by a ClusterPolicy that automatically allows scraping from the monitoring namespace. No human intervention required for new services to get the baseline security posture.
 `,
           interviewQuestions: [
             {
@@ -1324,122 +2043,308 @@ Without DNS, \`kubectl exec -- curl my-service\` fails with "Name or service not
 
 ## ConfigMaps: Non-Sensitive Configuration
 
-A ConfigMap stores key-value pairs decoupled from the container image. Use for: environment names, feature flags, configuration files.
+A ConfigMap decouples configuration data from container images. The 12-factor app methodology says "config" is anything that varies between deployments (dev vs staging vs prod) — and that config should NOT be baked into the image.
+
+**What belongs in a ConfigMap:**
+- Environment names, log levels, feature flags
+- Server configuration files (nginx.conf, prometheus.yml, app.properties)
+- URLs to external services (database endpoint, Redis address)
+- Non-secret tuning parameters
 
 \`\`\`yaml
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: app-config
+  namespace: production
 data:
+  # Simple key-value pairs (used as env vars):
   APP_ENV: "production"
   LOG_LEVEL: "info"
+  CACHE_TTL: "300"
+  DATABASE_POOL_SIZE: "10"
+
+  # Multi-line value (mounted as a file):
+  nginx.conf: |
+    server {
+      listen 80;
+      location /health {
+        return 200 'ok';
+      }
+    }
+
+  # Properties file format:
   app.properties: |
     server.port=8080
-    cache.ttl=300
-    feature.payments=true
+    feature.new-checkout=true
+    max.retry.count=3
 \`\`\`
 
-### Using ConfigMaps
+### Three Ways to Consume ConfigMaps
+
+Each method has different behavior, especially for hot-reloading:
 
 \`\`\`yaml
 spec:
   containers:
   - name: app
     image: myapp:v1
-    # Method 1: individual env vars
+
+    # Method 1: individual env var from a specific key
     env:
-    - name: APP_ENV
+    - name: APP_ENV                    # the env var name inside the container
+      valueFrom:
+        configMapKeyRef:
+          name: app-config             # ConfigMap name
+          key: APP_ENV                 # key within the ConfigMap
+    - name: DB_POOL_SIZE
       valueFrom:
         configMapKeyRef:
           name: app-config
-          key: APP_ENV
-    # Method 2: all keys as env vars
+          key: DATABASE_POOL_SIZE
+          optional: false              # pod fails to start if this key doesn't exist
+
+    # Method 2: ALL keys as env vars at once (convenient, can cause name collisions)
     envFrom:
     - configMapRef:
-        name: app-config
-    # Method 3: mount as files
+        name: app-config               # every key in app-config becomes an env var
+      prefix: "APP_"                   # optional: prefix all keys to avoid collisions
+
+    # Method 3: mount as files in a volume (supports hot-reload)
     volumeMounts:
-    - name: config-volume
-      mountPath: /etc/config
+    - name: nginx-config
+      mountPath: /etc/nginx/conf.d/    # nginx.conf appears here as a file
+    - name: app-config-vol
+      mountPath: /etc/app/             # app.properties appears here as a file
+
   volumes:
-  - name: config-volume
+  - name: nginx-config
+    configMap:
+      name: app-config
+      items:                           # mount ONLY specific keys as files
+      - key: nginx.conf
+        path: default.conf             # the file name inside mountPath
+  - name: app-config-vol
     configMap:
       name: app-config
 \`\`\`
 
+### Hot-Reloading: Volume Mounts vs Env Vars
+
+This is a critical operational difference:
+
+\`\`\`
+Method 3 (volume mount) → kubelet syncs ConfigMap changes to mounted files every ~1 minute
+  Application can use inotify/fsnotify to watch for file changes and reload config
+  nginx can reload: nginx -s reload
+  RESULT: Config change takes effect WITHOUT restarting the pod
+
+Method 1 & 2 (env vars) → Values are injected at pod startup and NEVER change
+  Updating the ConfigMap does NOT update env vars in running pods
+  RESULT: Must restart pods for env var changes to take effect
+  kubectl rollout restart deployment/<name>
+\`\`\`
+
+\`\`\`bash
+# After updating a ConfigMap:
+# For volume-mounted config (app watches files): no action needed
+# For env var config: restart the deployment
+kubectl rollout restart deployment/payments-api
+\`\`\`
+
+### Immutable ConfigMaps (Performance Optimization)
+
+For ConfigMaps that change rarely (or never in production), mark them immutable:
+
+\`\`\`yaml
+immutable: true    # prevents any updates; kubelet stops watching it (saves API server load)
+\`\`\`
+
+At scale (1,000+ pods watching the same ConfigMap), the constant watch loop adds load on the API server. Immutable ConfigMaps opt out of this. To "update" an immutable ConfigMap, create a new one with a different name and update the pod spec to reference it — this triggers a rolling restart automatically.
+
 ## Secrets: Sensitive Data (With a Critical Warning)
 
-Secrets store sensitive data (passwords, tokens, certs). They look like ConfigMaps but with base64-encoded values.
+Secrets look almost identical to ConfigMaps but are intended for sensitive data: passwords, API keys, TLS certificates, tokens.
 
 \`\`\`yaml
 apiVersion: v1
 kind: Secret
 metadata:
   name: db-credentials
-type: Opaque
-stringData:              # K8s base64-encodes these automatically
+  namespace: production
+type: Opaque                # Opaque = arbitrary data (most common type)
+stringData:                 # K8s automatically base64-encodes these when stored
   username: myuser
-  password: supersecret
+  password: supersecret123
+  connection-string: "postgresql://myuser:supersecret123@db.example.com:5432/app"
+
+# Other Secret types:
+# type: kubernetes.io/tls         → TLS certificate + key pair
+# type: kubernetes.io/dockerconfigjson → registry credentials (imagePullSecrets)
+# type: kubernetes.io/service-account-token → ServiceAccount tokens
 \`\`\`
 
-**CRITICAL WARNING: Kubernetes Secrets are NOT encrypted by default.**
+### CRITICAL: Kubernetes Secrets Are NOT Encrypted by Default
 
-Base64 is encoding, not encryption. Anyone with kubectl access can decode them:
+Base64 is **encoding**, not encryption. It can be trivially decoded:
+
 \`\`\`bash
+# Anyone with kubectl access can decode a Secret:
 kubectl get secret db-credentials -o jsonpath='{.data.password}' | base64 -d
-# Outputs: supersecret
+# Outputs: supersecret123
+
+# Secrets are stored in etcd in base64 (not encrypted) unless you configure EncryptionConfiguration
+# A backup of etcd contains all your "secrets" in plaintext
 \`\`\`
 
-Secrets are stored in etcd in plaintext (base64 encoded) unless you configure **encryption at rest**.
+**What this means in practice:**
+- Anyone with \`kubectl get secrets\` RBAC permission can read all secrets
+- Anyone with direct etcd access reads all secrets
+- An etcd backup on S3 without encryption contains all your secrets
+- Container logs that accidentally print env vars expose secrets
 
-## Production Secret Management
+## Production Secret Management — Three Approaches
 
-### Option 1: Encrypt etcd at rest (minimum baseline)
+### Option 1: Encrypt etcd at Rest (Minimum Baseline — Self-Managed Clusters)
+
+Configure the API server to encrypt Secrets before writing to etcd:
+
 \`\`\`yaml
-# /etc/kubernetes/encryption-config.yaml on control plane
+# /etc/kubernetes/encryption-config.yaml (on every control plane node)
 apiVersion: apiserver.config.k8s.io/v1
 kind: EncryptionConfiguration
 resources:
 - resources:
-  - secrets
+  - secrets                # encrypt Secret objects
   providers:
-  - aescbc:
+  - aesgcm:                # AES-GCM (preferred over aescbc — authenticated encryption)
       keys:
       - name: key1
-        secret: <base64-encoded-32-byte-key>
-  - identity: {}
+        secret: <base64-encoded-32-byte-key>   # openssl rand -base64 32
+  - identity: {}           # fallback for existing unencrypted secrets (read-only)
 \`\`\`
 
-### Option 2: Sealed Secrets (GitOps-friendly)
 \`\`\`bash
-# Encrypt a secret with the cluster's public key
-kubeseal --format yaml < secret.yaml > sealed-secret.yaml
-# sealed-secret.yaml can safely be committed to git
-# Only the cluster's private key can decrypt it
+# After configuring: re-encrypt all existing secrets
+kubectl get secrets -A -o json | kubectl replace -f -
+
+# Verify encryption is working:
+# Read a secret directly from etcd (should show encrypted bytes, not readable text)
+ETCDCTL_API=3 etcdctl get /registry/secrets/production/db-credentials | hexdump -C
 \`\`\`
 
-### Option 3: External Secrets Operator (recommended for production)
-Syncs secrets from AWS Secrets Manager, HashiCorp Vault, GCP Secret Manager into Kubernetes Secrets.
+Note: Managed Kubernetes (EKS, GKE, AKS) encrypts etcd at rest automatically using KMS.
+
+### Option 2: Sealed Secrets — GitOps-Friendly Encrypted Secrets
+
+Sealed Secrets (by Bitnami) lets you commit encrypted secrets to git safely:
+
+\`\`\`bash
+# Install the Sealed Secrets controller in the cluster
+helm install sealed-secrets sealed-secrets/sealed-secrets -n kube-system
+
+# Get the public key (used to encrypt):
+kubeseal --fetch-cert > pub-cert.pem
+
+# Encrypt a secret with the cluster's public key:
+kubectl create secret generic db-credentials \\
+  --from-literal=password=supersecret123 \\
+  --dry-run=client -o yaml | \\
+  kubeseal --cert pub-cert.pem --format yaml > sealed-db-credentials.yaml
+
+# ✓ sealed-db-credentials.yaml is safe to commit to git
+# The encrypted data can only be decrypted by the cluster's private key
+git add sealed-db-credentials.yaml
+\`\`\`
 
 \`\`\`yaml
+# The resulting sealed secret (safe to commit):
+apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+spec:
+  encryptedData:
+    password: AgBy8hCe...  # RSA-encrypted ciphertext — unreadable without the cluster's private key
+\`\`\`
+
+When applied to the cluster, the Sealed Secrets controller decrypts it and creates a regular Kubernetes Secret.
+
+### Option 3: External Secrets Operator — Centralized Secret Management (Recommended)
+
+ESO syncs secrets from external vaults (AWS Secrets Manager, HashiCorp Vault, GCP Secret Manager) into Kubernetes Secrets. The source of truth is the external vault, not Kubernetes.
+
+\`\`\`yaml
+# First, create a SecretStore that tells ESO how to connect to AWS Secrets Manager:
+apiVersion: external-secrets.io/v1beta1
+kind: ClusterSecretStore
+metadata:
+  name: aws-secretsmanager
+spec:
+  provider:
+    aws:
+      service: SecretsManager
+      region: us-east-1
+      auth:
+        jwt:                               # use IRSA (IAM Roles for Service Accounts)
+          serviceAccountRef:
+            name: external-secrets-sa
+---
+# Now reference a secret from AWS Secrets Manager:
 apiVersion: external-secrets.io/v1beta1
 kind: ExternalSecret
 metadata:
   name: db-credentials
+  namespace: production
 spec:
-  refreshInterval: 1h
+  refreshInterval: 1h                    # re-sync every hour (picks up rotations)
   secretStoreRef:
     name: aws-secretsmanager
     kind: ClusterSecretStore
   target:
-    name: db-credentials   # creates this K8s Secret
+    name: db-credentials                 # name of the Kubernetes Secret to create
+    creationPolicy: Owner                # ESO owns the K8s Secret (recreates if deleted)
   data:
-  - secretKey: password
+  - secretKey: password                  # key in the Kubernetes Secret
+    remoteRef:
+      key: prod/database/credentials     # path in AWS Secrets Manager
+      property: password                 # JSON key within the secret value
+  - secretKey: username
     remoteRef:
       key: prod/database/credentials
-      property: password
+      property: username
 \`\`\`
+
+**Benefits of ESO:**
+- Secrets never need to be committed to git (even encrypted)
+- Automatic rotation: when AWS Secrets Manager rotates the secret, ESO creates a new K8s Secret version within \`refreshInterval\`
+- Audit trail: every secret access is logged in AWS CloudTrail
+- Used by **Airbnb, Lyft, DoorDash** in production
+
+\`\`\`bash
+# Check ESO sync status:
+kubectl get externalsecret db-credentials -n production
+# NAME              STORE                  REFRESH INTERVAL  STATUS
+# db-credentials    aws-secretsmanager     1h                SecretSynced
+\`\`\`
+
+## Under the Hood — How Secrets Are Delivered to Pods
+
+When a pod references a Secret (via env vars or volume mount), the kubelet fetches the Secret from the API server and:
+- For env vars: injects values at container creation time (never updates after start)
+- For volume mounts: creates a tmpfs (in-memory filesystem) at the mount path. Files are stored in RAM, not on the node's disk. Updated when the Secret changes (kubelet sync period, ~1 minute).
+
+The tmpfs approach is why Secret volume mounts are more secure than env vars — env vars appear in process listings, crash dumps, and debug output. Files in tmpfs are only accessible to the container.
+
+## Common Mistakes
+
+- **Base64 in ConfigMaps as "encryption"**: ConfigMaps have no encryption — base64 there is not protection, it's just encoding. Use Secrets (with encryption at rest) for sensitive data.
+- **Secrets in environment variables show up in logs**: If your app logs all env vars on startup (common in Java Spring Boot), Secret values are logged. Use volume mounts for Secrets to reduce exposure surface.
+- **Updating a ConfigMap with env vars and expecting live reload**: Env vars never update after pod start. You MUST restart the pod. Volume mounts reload within ~1 minute.
+- **Not using External Secrets**: Committing even Sealed Secrets to git means if the cluster's private key is ever lost or compromised, all historical "sealed" secrets are decryptable. ESO keeps secrets out of git entirely.
+- **Overly permissive RBAC on secrets**: \`verbs: ["get", "list", "watch"]\` on secrets lets users read ALL secrets. Narrow this with \`resourceNames: ["only-this-secret"]\` where possible.
+
+## Production Pattern
+
+**DoorDash** uses the External Secrets Operator with AWS Secrets Manager. Every team's secrets are scoped in AWS Secrets Manager under a path matching their team (\`prod/team-payments/db-password\`). IAM policies restrict each team's ExternalSecret to only their prefix. The ESO controller uses IRSA to authenticate to AWS. No plaintext or sealed secrets exist in git — the source of truth is AWS Secrets Manager with automatic rotation for database passwords via AWS RDS secret rotation.
 `,
           interviewQuestions: [
             {

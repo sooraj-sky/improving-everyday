@@ -25,6 +25,24 @@ export const pythonTrack: Track = {
           description: "Install Python and set up a proper development environment.",
           content: `# Installing Python
 
+## Why Python Version Management Matters
+
+Python has a versioning problem: macOS and Linux ship with system Python (often Python 3.9 or older), which is owned by the OS and used by system tools. If you install packages into system Python using \`sudo pip\`, you risk breaking those OS tools. If you just use system Python without \`sudo\`, packages install to a per-user directory that may conflict between projects.
+
+The solution used by professional developers is **pyenv** for version management and **virtual environments** for project isolation. This is the setup pattern you'll see in every serious Python project.
+
+---
+
+## Why pyenv?
+
+pyenv solves three problems:
+
+1. **Multiple Python versions side by side** — your ML project needs Python 3.11, your DevOps scripts need 3.12, your legacy app needs 3.9. pyenv installs all three and switches between them per-directory.
+2. **No root required** — installs Python in \`~/.pyenv\` under your home directory. No \`sudo\`.
+3. **Per-project version locking** — a \`.python-version\` file in a directory makes pyenv auto-switch to that version when you \`cd\` into it.
+
+---
+
 ## Installation
 
 ### macOS
@@ -36,35 +54,50 @@ curl https://pyenv.run | bash
 # Add to shell config (~/.zshrc or ~/.bashrc):
 export PYENV_ROOT="$HOME/.pyenv"
 export PATH="$PYENV_ROOT/bin:$PATH"
-eval "$(pyenv init -)"
+eval "$(pyenv init -)"   # sets up shims — lightweight wrappers that intercept python/pip calls
 
-# Install Python
+# Reload shell config
+source ~/.zshrc
+
+# Install Python (builds from source — takes ~2 min)
 pyenv install 3.12.3
-pyenv global 3.12.3
+pyenv global 3.12.3        # set as default Python for your user
 
-# Or use Homebrew
+# Or use Homebrew (simpler but less flexible)
 brew install python@3.12
 \`\`\`
 
 ### Linux (Ubuntu/Debian)
 
 \`\`\`bash
+# Install pyenv dependencies first
 sudo apt update
-sudo apt install python3.12 python3.12-venv python3-pip
+sudo apt install -y build-essential libssl-dev zlib1g-dev \
+  libbz2-dev libreadline-dev libsqlite3-dev curl \
+  libncursesw5-dev xz-utils tk-dev libxml2-dev libxmlsec1-dev libffi-dev liblzma-dev
 
-# Or use pyenv (same as macOS)
+# Install pyenv
+curl https://pyenv.run | bash
+
+# Same shell config additions as macOS above...
+
+# Or install system Python (simpler but limited version control)
+sudo apt install python3.12 python3.12-venv python3-pip
 \`\`\`
 
 ### Windows
 
 \`\`\`powershell
 # Download from python.org/downloads
-# Or use winget
+# Or use winget (Windows Package Manager)
 winget install Python.Python.3.12
 
-# Or use pyenv-win
+# Or use pyenv-win for version management
 pip install pyenv-win --target $HOME\\.pyenv
+[System.Environment]::SetEnvironmentVariable('PYENV', "$HOME\.pyenv\pyenv-win", 'User')
 \`\`\`
+
+---
 
 ## Verify Installation
 
@@ -75,13 +108,74 @@ python3 --version
 python3 -c "print('Hello, DevOps!')"
 # Hello, DevOps!
 
+which python3
+# /Users/you/.pyenv/shims/python3  ← if using pyenv (correct)
+# /usr/bin/python3                  ← if using system Python
+
 pip3 --version
-# pip 24.0 from ...
+# pip 24.0 from ~/.pyenv/versions/3.12.3/lib/...  (pyenv pip)
 \`\`\`
+
+**Important**: Always verify \`which python3\` points to pyenv's shims directory, not \`/usr/bin\` or \`/usr/local/bin\`, before installing packages.
+
+---
+
+## Virtual Environments — Essential for Every Project
+
+A virtual environment is a self-contained Python installation with its own packages, isolated from the system Python and from other virtual environments. Think of it like a Docker container for Python dependencies.
+
+**Why you need virtual environments:**
+- Project A needs \`requests==2.28\`, Project B needs \`requests==2.31\` — venvs let both coexist
+- \`pip install\` in a venv never affects system Python or other projects
+- You can \`rm -rf .venv/\` and start fresh without breaking anything
+- CI/CD can create a fresh venv on each run for reproducibility
+
+\`\`\`bash
+# Create a virtual environment in the project directory
+cd my-devops-project
+python3 -m venv .venv        # creates .venv/ directory
+
+# Activate it (macOS/Linux)
+source .venv/bin/activate
+# Activate (Windows PowerShell)
+.venv\\Scripts\\Activate.ps1
+
+# Your prompt changes: (.venv) you@machine:~$
+
+# Now pip installs go INTO .venv, not system Python
+pip install requests boto3 pyyaml
+
+# See what's installed
+pip list
+
+# Freeze exact versions for reproducibility
+pip freeze > requirements.txt
+# requests==2.31.0
+# boto3==1.34.0
+# pyyaml==6.0.1
+
+# Deactivate when done
+deactivate
+
+# On another machine / in CI:
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt    # installs exact pinned versions
+\`\`\`
+
+**Add .venv to .gitignore** — never commit the virtual environment directory:
+
+\`\`\`bash
+echo ".venv/" >> .gitignore
+echo "__pycache__/" >> .gitignore
+echo "*.pyc" >> .gitignore
+\`\`\`
+
+---
 
 ## The REPL (Interactive Shell)
 
-Python's REPL (Read-Eval-Print Loop) lets you experiment interactively:
+Python's REPL (Read-Eval-Print Loop) lets you experiment interactively — ideal for testing small pieces of code before putting them in a script:
 
 \`\`\`bash
 python3
@@ -95,29 +189,75 @@ python3
 >>> import os
 >>> os.getcwd()
 '/Users/you'
+>>> import json; json.dumps({"key": "value"})
+'{"key": "value"}'
 >>> exit()
 \`\`\`
 
-> **Tip:** IPython and Jupyter are enhanced REPLs great for experimentation:
+> **Tip:** IPython gives you syntax highlighting, tab completion, and magic commands — great for exploration:
 > \`pip install ipython && ipython\`
+
+---
 
 ## Running Python Scripts
 
 \`\`\`bash
 # Create a script
-cat > hello.py << 'EOF'
+cat > deploy_check.py << 'EOF'
 #!/usr/bin/env python3
-name = "DevOps"
-print(f"Hello, {name}!")
+"""Check if all required environment variables are set before deployment."""
+import os
+import sys
+
+required_vars = ["DATABASE_URL", "API_KEY", "AWS_REGION"]
+
+missing = [var for var in required_vars if not os.getenv(var)]
+
+if missing:
+    print(f"ERROR: Missing environment variables: {', '.join(missing)}")
+    sys.exit(1)
+
+print("All required environment variables are set. Proceeding...")
 EOF
 
 # Run it
-python3 hello.py
-# Hello, DevOps!
+python3 deploy_check.py
 
-# Make it executable (Unix)
-chmod +x hello.py
-./hello.py
+# Make it executable (Unix — the shebang line #!/usr/bin/env python3 is used)
+chmod +x deploy_check.py
+./deploy_check.py
+\`\`\`
+
+**Shebang line explained**: \`#!/usr/bin/env python3\` tells the OS to find \`python3\` in PATH and use it to run the script. Using \`env\` rather than a hardcoded path (\`#!/usr/bin/python3\`) makes the script portable across machines where Python might be installed in different locations.
+
+---
+
+## Python Version Management with pyenv
+
+\`\`\`bash
+# List available Python versions to install
+pyenv install --list | grep "  3\\."
+
+# Install multiple versions
+pyenv install 3.11.9
+pyenv install 3.12.3
+
+# Set global default
+pyenv global 3.12.3
+
+# Set version for a specific directory (creates .python-version file)
+cd ~/projects/legacy-app
+pyenv local 3.11.9
+python3 --version   # Python 3.11.9 — auto-switched!
+
+# List installed versions
+pyenv versions
+#   system
+# * 3.12.3 (set by ~/.pyenv/version)
+#   3.11.9
+
+# Uninstall a version
+pyenv uninstall 3.11.9
 \`\`\`
 `,
           interviewQuestions: [
@@ -160,7 +300,27 @@ chmod +x hello.py
           description: "Learn Python's dynamic type system and core data types.",
           content: `# Variables & Data Types
 
-Python is **dynamically typed** — you don't declare types explicitly. The interpreter infers them.
+## How Python's Type System Works
+
+Python is **dynamically typed** — the type of a variable is determined at runtime by the value assigned to it, not declared in advance. This is different from Java or Go where you write \`int count = 0;\`.
+
+Under the hood, every Python value is an **object** on the heap. A variable is just a name that points (references) to that object. When you write \`x = 42\`, Python creates an \`int\` object with value 42 and binds the name \`x\` to it. When you write \`x = "hello"\`, \`x\` now points to a new \`str\` object — the integer still exists until garbage collected.
+
+This has a practical consequence: **multiple variables can point to the same object**:
+
+\`\`\`python
+a = [1, 2, 3]
+b = a          # b points to the SAME list, not a copy
+b.append(4)
+print(a)       # [1, 2, 3, 4] — a was modified too!
+
+# To copy: use .copy() or list()
+b = a.copy()   # now b is an independent list
+\`\`\`
+
+Understanding references vs copies prevents a major class of bugs in Python automation scripts.
+
+---
 
 ## Variables
 
@@ -171,20 +331,34 @@ age = 30
 is_active = True
 score = 98.5
 
-# Multiple assignment
+# Multiple assignment — all three point to the same 0 object
 x = y = z = 0
 
-# Swap
+# Tuple unpacking — swap without a temp variable
 a, b = 1, 2
-a, b = b, a  # a=2, b=1
+a, b = b, a    # a=2, b=1
 
-# Delete a variable
+# Unpack from a list or tuple
+host, port = "localhost", 5432
+
+# Star unpacking
+first, *rest = [1, 2, 3, 4, 5]
+# first=1, rest=[2, 3, 4, 5]
+
+head, *middle, last = [1, 2, 3, 4, 5]
+# head=1, middle=[2, 3, 4], last=5
+
+# Delete a variable (removes the name binding, object may still exist in memory)
 del name
 \`\`\`
 
+---
+
 ## Core Types
 
-### Strings
+### Strings — Immutable Text
+
+Strings are **immutable** — string methods always return a new string, never modify in place. This is different from lists.
 
 \`\`\`python
 name = "DevOps"
@@ -194,90 +368,214 @@ This spans
 multiple lines
 """
 
-# f-strings (preferred formatting)
+# f-strings (Python 3.6+, preferred for formatting — faster than .format())
 version = 3.12
-print(f"Python {version}")
-# Python 3.12
+print(f"Python {version}")            # Python 3.12
+print(f"2 + 2 = {2 + 2}")            # 2 + 2 = 4
+print(f"Path: {'/'.join(['usr', 'bin', 'python3'])}")  # expressions work
 
-# String methods
-"hello".upper()           # 'HELLO'
-"  strip me  ".strip()    # 'strip me'
-"a,b,c".split(",")        # ['a', 'b', 'c']
-",".join(["a", "b"])      # 'a,b'
+# Common string methods — all return new strings
+"hello".upper()                        # 'HELLO'
+"HELLO".lower()                        # 'hello'
+"  strip me  ".strip()                 # 'strip me'  (also lstrip, rstrip)
+"  strip me  ".strip()                 # 'strip me'
+"a,b,c".split(",")                     # ['a', 'b', 'c']
+",".join(["a", "b", "c"])             # 'a,b,c'
 "hello world".replace("world", "Python")  # 'hello Python'
-len("hello")              # 5
+len("hello")                           # 5
+"hello".startswith("he")              # True
+"hello".endswith("lo")                # True
+"git" in "github"                     # True (membership test)
+"hello world".count("l")             # 3
 
-# String contains
-"git" in "github"         # True
+# String formatting for DevOps scripts
+ip = "192.168.1.1"
+port = 8080
+url = f"http://{ip}:{port}/health"    # 'http://192.168.1.1:8080/health'
+
+# Multiline strings for embedding configs or SQL
+nginx_config = """
+server {
+    listen 80;
+    server_name example.com;
+}
+"""
+
+# Raw strings (r-prefix) — backslashes not treated as escape sequences
+windows_path = r"C:\\Users\\alice"    # useful for Windows paths and regex
 \`\`\`
 
-### Numbers
+### Numbers — Integers and Floats
 
 \`\`\`python
-# Integer
+# Integer — arbitrary precision in Python (no overflow!)
 count = 42
-big = 1_000_000     # underscores for readability
+big = 1_000_000       # underscores for readability — same as 1000000
+binary = 0b1010       # binary literal → 10
+hex_val = 0xFF        # hex literal → 255
 
-# Float
+# Float — 64-bit IEEE 754 (has precision limits!)
 pi = 3.14159
 temp = -17.5
+scientific = 1.5e10   # 15000000000.0
 
-# Arithmetic
-10 // 3     # 3 (floor division)
-10 % 3      # 1 (modulo)
-2 ** 10     # 1024 (exponentiation)
+# IMPORTANT: float comparison pitfall
+0.1 + 0.2 == 0.3      # False! (float precision)
+abs(0.1 + 0.2 - 0.3) < 1e-9  # True — use epsilon comparison
+
+# Arithmetic operators
+10 + 3    # 13
+10 - 3    # 7
+10 * 3    # 30
+10 / 3    # 3.3333...  (always float in Python 3)
+10 // 3   # 3  (floor division — rounds down to int)
+10 % 3    # 1  (modulo — remainder)
+2 ** 10   # 1024  (exponentiation)
 
 # Type conversion
-int("42")         # 42
-float("3.14")     # 3.14
-str(100)          # "100"
+int("42")           # 42
+int("0xFF", 16)     # 255 (parse hex string)
+float("3.14")       # 3.14
+str(100)            # "100"
+bin(10)             # "0b1010"
+hex(255)            # "0xff"
 
-# Check type
-type(42)          # <class 'int'>
-isinstance(42, int)  # True
+# Type checking
+type(42)                # <class 'int'>
+isinstance(42, int)     # True (preferred over type() for inheritance)
+isinstance(42, (int, float))  # True — check multiple types
 \`\`\`
 
-### Booleans
+### Booleans — True, False, and Truthiness
 
 \`\`\`python
 is_running = True
 has_error = False
 
-# Falsy values (evaluate as False)
-# False, None, 0, 0.0, "", [], {}, set()
+# Falsy values — all evaluate to False in boolean context:
+# False, None, 0, 0.0, 0j, "", b"", [], (), {}, set()
+bool(0)       # False
+bool("")      # False
+bool([])      # False
+bool(None)    # False
+bool("hi")    # True
+bool([1])     # True
+bool(-1)      # True (non-zero numbers are truthy!)
 
-bool(0)      # False
-bool("")     # False
-bool([])     # False
-bool("hi")   # True
-bool([1])    # True
+# Pythonic boolean usage — don't write == True or == False
+services = get_running_services()
+
+# Anti-pattern:
+if len(services) > 0:
+    ...
+if services == []:
+    ...
+
+# Pythonic:
+if services:           # truthy if non-empty
+    ...
+if not services:       # falsy if empty
+    ...
 \`\`\`
 
-### None
+### None — The Absence of a Value
 
 \`\`\`python
-result = None   # "no value" / null
+result = None   # represents "no value" — like null in other languages
 
+# Always use 'is None', never '== None'
+# 'is' checks identity (same object), '==' checks equality
+# A custom object could override __eq__ to equal None, but 'is None' is always reliable
 if result is None:
     print("No result yet")
 
-# Use 'is None' not '== None'
+if result is not None:
+    process(result)
+
+# Functions return None implicitly if no return statement
+def log(message):
+    print(f"[LOG] {message}")
+    # implicitly returns None
+
+value = log("test")
+print(value)   # None
 \`\`\`
+
+---
+
+## Mutable vs Immutable Types
+
+This is one of the most important distinctions in Python:
+
+| Immutable | Mutable |
+|-----------|---------|
+| int, float, bool | list |
+| str | dict |
+| tuple | set |
+| frozenset | bytearray |
+
+**Immutable** objects cannot be changed after creation. When you "modify" a string, Python creates a new string object.
+
+**Mutable** objects can be changed in-place. When you pass a list to a function and modify it, the caller sees the change.
+
+\`\`\`python
+# Immutable: string operations create new objects
+s = "hello"
+s.upper()    # returns "HELLO" — s is still "hello"
+s = s.upper()  # reassign s to the new string
+
+# Mutable: list operations modify in place
+items = [1, 2, 3]
+items.append(4)  # modifies items directly, returns None
+items[0] = 99    # in-place modification
+
+# Danger: mutable default arguments in functions
+def add_item(item, lst=[]):    # DON'T DO THIS
+    lst.append(item)
+    return lst
+
+add_item("a")   # ["a"]
+add_item("b")   # ["a", "b"]  ← bug! default list is shared across calls
+
+def add_item(item, lst=None):  # Correct pattern
+    if lst is None:
+        lst = []
+    lst.append(item)
+    return lst
+\`\`\`
+
+---
 
 ## Type Hints (Python 3.5+)
 
-Type hints make code more readable and enable IDE support — they're not enforced at runtime:
+Type hints document what types your functions expect and return. They're not enforced at runtime but enable IDE autocomplete, catch bugs with mypy/pyright, and serve as documentation.
 
 \`\`\`python
+# Basic type hints
 def greet(name: str) -> str:
     return f"Hello, {name}!"
 
+def get_port(service: str) -> int:
+    ports = {"nginx": 80, "postgres": 5432, "redis": 6379}
+    return ports.get(service, 8080)
+
+# Complex types (Python 3.9+ — use list, dict, tuple directly)
 def process(items: list[str], limit: int = 10) -> dict[str, int]:
+    return {item: len(item) for item in items[:limit]}
+
+# Optional type (can be None) — Python 3.10+ use X | None
+from typing import Optional
+def find_user(user_id: int) -> Optional[str]:
     ...
 
-# Optional type (can be None)
-from typing import Optional
-def find_user(id: int) -> Optional[str]:
+# Python 3.10+ union syntax
+def find_user(user_id: int) -> str | None:
+    ...
+
+# Type alias
+IPAddress = str
+Port = int
+def connect(host: IPAddress, port: Port) -> bool:
     ...
 \`\`\`
 `,
@@ -489,20 +787,38 @@ service_names = [s.name for s in services]
           description: "Master the most commonly used Python data structures.",
           content: `# Lists & Dictionaries
 
+## Why These Two Data Structures Dominate Python
+
+In any Python DevOps script, you'll spend 80% of your time working with lists and dictionaries. Here's why:
+
+- **Lists** model sequences: log lines from a file, server names from an API response, IP addresses in a CIDR block, results from a database query.
+- **Dictionaries** model structured data: a JSON response from AWS, a parsed YAML config file, an environment's configuration, a service's health status.
+
+Understanding how they work internally helps you write faster, more correct code.
+
+---
+
 ## Lists — Ordered, Mutable Sequences
+
+**Internal structure**: A Python list is a dynamic array. It allocates more capacity than needed (over-allocates) to make \`append()\` O(1) amortized. Accessing by index is O(1). Inserting or removing at the beginning is O(n) because all elements shift.
 
 \`\`\`python
 # Creating lists
 servers = ["web-01", "web-02", "db-01"]
 ports = [80, 443, 8080]
-mixed = [1, "hello", True, None, [1, 2]]  # Any types
+mixed = [1, "hello", True, None, [1, 2]]  # Any types — even nested lists
 
 # Accessing elements (0-indexed)
-servers[0]      # "web-01"
-servers[-1]     # "db-01" (last element)
-servers[1:3]    # ["web-02", "db-01"] (slice)
-servers[:2]     # ["web-01", "web-02"]
-servers[::2]    # ["web-01", "db-01"] (step)
+servers[0]      # "web-01"  (first element)
+servers[-1]     # "db-01"   (last element — -1 counts from end)
+servers[-2]     # "web-02"  (second to last)
+
+# Slicing — returns a new list [start:stop:step] (stop is exclusive)
+servers[1:3]    # ["web-02", "db-01"]  (index 1 and 2, not 3)
+servers[:2]     # ["web-01", "web-02"] (from start to index 2)
+servers[1:]     # ["web-02", "db-01"]  (from index 1 to end)
+servers[::2]    # ["web-01", "db-01"]  (every 2nd element)
+servers[::-1]   # ["db-01", "web-02", "web-01"]  (reverse a list)
 \`\`\`
 
 ### Modifying Lists
@@ -510,50 +826,100 @@ servers[::2]    # ["web-01", "db-01"] (step)
 \`\`\`python
 servers = ["web-01", "web-02"]
 
-servers.append("web-03")           # Add to end
-servers.insert(0, "lb-01")        # Insert at index
-servers.extend(["db-01", "db-02"]) # Add multiple
+# Adding elements
+servers.append("web-03")            # Add to end — O(1) amortized
+servers.insert(0, "lb-01")         # Insert at index 0 — O(n), shifts everything
+servers.extend(["db-01", "db-02"]) # Add all elements from another iterable
 
-servers.remove("web-02")           # Remove by value
-popped = servers.pop()             # Remove and return last
-popped = servers.pop(0)            # Remove and return at index
+# Removing elements
+servers.remove("web-02")            # Remove first occurrence by VALUE — O(n) scan
+popped = servers.pop()              # Remove and RETURN last element — O(1)
+popped = servers.pop(0)             # Remove and return at index — O(n)
+servers.clear()                     # Remove all elements
 
-servers.sort()                     # Sort in place
-servers.reverse()                  # Reverse in place
+# Sorting
+servers.sort()                      # Sort IN PLACE (modifies list, returns None)
+servers.sort(reverse=True)          # Descending
+sorted_copy = sorted(servers)       # Returns NEW sorted list, original unchanged
+servers.sort(key=lambda s: s.split("-")[1])  # Sort by custom key
 
-sorted_copy = sorted(servers)      # Returns new sorted list
-reversed_copy = list(reversed(servers))
+# Reversing
+servers.reverse()                   # Reverse in place
+reversed_copy = list(reversed(servers))  # New reversed list
 
-len(servers)           # Length
-"web-01" in servers    # True/False
-servers.index("web-01") # Find index
-servers.count("web-01")  # Count occurrences
+# Querying
+len(servers)                # Number of elements
+"web-01" in servers         # True/False — O(n) linear scan
+servers.index("web-01")     # Index of first occurrence (raises ValueError if missing)
+servers.count("web-01")     # Count occurrences
 \`\`\`
 
-### Common List Patterns in DevOps
+### List Comprehensions — The Pythonic Way
+
+List comprehensions are more readable AND faster than equivalent for-loops because they're optimized in CPython:
 
 \`\`\`python
-# Filter failed jobs
+# Traditional for-loop approach
+failed = []
+for j in jobs:
+    if j["status"] == "failed":
+        failed.append(j)
+
+# List comprehension — same result, more readable, faster
 failed = [j for j in jobs if j["status"] == "failed"]
 
-# Extract field from list of dicts
-names = [s["name"] for s in services]
+# Structure: [expression for item in iterable if condition]
 
-# Flatten nested list
+# Extract a field from a list of dicts (very common with API responses)
+names = [s["name"] for s in services]
+urls = [f"http://{s['host']}:{s['port']}/health" for s in services]
+
+# Flatten a nested list
 all_ports = [port for server in servers for port in server["ports"]]
 
 # Sort by field
 services.sort(key=lambda s: s["cpu_usage"], reverse=True)
+top_3_cpu = services[:3]
 
-# Remove duplicates (preserving order)
+# Remove duplicates — preserving order (sets don't preserve order)
 seen = set()
 unique = [x for x in items if not (x in seen or seen.add(x))]
+
+# Or use dict.fromkeys() which preserves order in Python 3.7+
+unique = list(dict.fromkeys(items))
 \`\`\`
+
+### Sets — Unordered, No Duplicates
+
+Sets are like lists but unordered and with no duplicates. Membership testing is O(1) (hash table):
+
+\`\`\`python
+running = {"web-01", "web-02", "db-01"}
+healthy = {"web-01", "db-01", "db-02"}
+
+# Set operations (very useful for comparing infrastructure state)
+running & healthy   # Intersection: {"web-01", "db-01"}  (in both)
+running | healthy   # Union: {"web-01", "web-02", "db-01", "db-02"}  (in either)
+running - healthy   # Difference: {"web-02"}  (in running but not healthy)
+running ^ healthy   # Symmetric difference: {"web-02", "db-02"}  (in one but not both)
+
+# Practical: find services that are running but not healthy
+unhealthy_running = running - healthy   # {"web-02"}
+
+# Check membership — O(1) vs O(n) for list
+"web-01" in running   # True — hash lookup, instant even for 1M items
+\`\`\`
+
+---
 
 ## Dictionaries — Key-Value Mappings
 
+**Internal structure**: Python dicts are hash tables. Keys are hashed, and the hash determines the bucket where the value is stored. Lookup, insert, and delete are all O(1) average case. As of Python 3.7, dicts preserve **insertion order** (this is now guaranteed by the language spec).
+
+**Only hashable (immutable) types can be keys**: strings, numbers, tuples. Lists cannot be dict keys because they're mutable (their hash would change if you modified them).
+
 \`\`\`python
-# Creating
+# Creating dicts
 config = {
     "host": "localhost",
     "port": 5432,
@@ -561,37 +927,72 @@ config = {
     "ssl": True
 }
 
+# From pairs (useful when building from two lists)
+keys = ["host", "port", "db"]
+values = ["localhost", 5432, "myapp"]
+config = dict(zip(keys, values))
+
+# Dict comprehension — like list comprehension but for dicts
+env_vars = {k: v for k, v in os.environ.items() if k.startswith("APP_")}
+port_map = {service: 8000 + i for i, service in enumerate(["web", "api", "auth"])}
+
 # Accessing
-config["host"]          # "localhost"
-config.get("host")      # "localhost"
-config.get("timeout", 30)  # Returns default if missing (no KeyError)
+config["host"]              # "localhost" — raises KeyError if missing
+config.get("host")          # "localhost" — returns None if missing (safe)
+config.get("timeout", 30)   # Returns 30 if "timeout" key doesn't exist
 
 # Checking
-"host" in config        # True
-"password" in config    # False
+"host" in config            # True — O(1) hash lookup
+"password" not in config    # True
 
 # Modifying
-config["port"] = 5433             # Update
-config["timeout"] = 30            # Add new key
-del config["ssl"]                 # Delete key
-config.pop("ssl", None)           # Delete, return default if missing
+config["port"] = 5433       # Update existing key
+config["timeout"] = 30      # Add new key
+del config["ssl"]           # Delete key — raises KeyError if missing
+config.pop("ssl", None)     # Delete and return value, None if missing (safe)
 \`\`\`
 
 ### Dictionary Methods
 
 \`\`\`python
-config.keys()    # dict_keys(['host', 'port', ...])
-config.values()  # dict_values(['localhost', 5432, ...])
-config.items()   # dict_items([('host', 'localhost'), ...])
+# Iterate over keys, values, or both
+for key in config:                    # iterates over keys
+    print(key)
+for key in config.keys():            # explicit keys iteration
+    print(key)
+for value in config.values():        # values only
+    print(value)
+for key, value in config.items():    # key-value pairs (most common)
+    print(f"{key}: {value}")
 
-# Merge (Python 3.9+)
-defaults = {"timeout": 30, "retry": 3}
+# Merge dicts
+defaults = {"timeout": 30, "retry": 3, "ssl": False}
 custom = {"timeout": 60, "host": "prod-db"}
-merged = defaults | custom    # custom takes precedence
-# {'timeout': 60, 'retry': 3, 'host': 'prod-db'}
 
-# Update in place
-config.update({"timeout": 60, "host": "prod-db"})
+# Python 3.9+: | operator (non-destructive merge)
+merged = defaults | custom    # custom values override defaults
+# {"timeout": 60, "retry": 3, "ssl": False, "host": "prod-db"}
+
+# Python 3.5+: **unpacking (also non-destructive)
+merged = {**defaults, **custom}  # same result
+
+# In-place update
+defaults.update(custom)    # modifies defaults in place
+
+# setdefault — get value or set a default if key doesn't exist
+config.setdefault("timeout", 30)    # sets "timeout"=30 only if not already set
+
+# defaultdict — automatically creates default values for missing keys
+from collections import defaultdict
+counts = defaultdict(int)   # default value is int() = 0
+for item in items:
+    counts[item] += 1   # no KeyError on first access
+
+# Counter — specialized dict for counting
+from collections import Counter
+word_count = Counter(["aws", "gcp", "aws", "azure", "aws"])
+# Counter({"aws": 3, "gcp": 1, "azure": 1})
+word_count.most_common(2)   # [("aws", 3), ("gcp", 1)]
 \`\`\`
 
 ### Nested Structures

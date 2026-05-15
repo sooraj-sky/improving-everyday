@@ -34,74 +34,144 @@ export const awsTrack: Track = {
           ],
           content: `## AWS Global Infrastructure
 
-AWS operates a global network of data centres grouped into **Regions** and **Availability Zones**.
+AWS operates the world's largest cloud network — 33 geographic regions, 105+ Availability Zones, and 400+ edge locations as of 2024. Understanding how this infrastructure is structured is foundational to designing highly available, low-latency, and compliant applications.
+
+---
+
+## Why Geography Matters in Cloud
+
+Before cloud, your application lived in one data centre. If it burned down, you were offline. AWS's global infrastructure solves this by distributing your workload across physically isolated facilities — but this requires you to understand the hierarchy and design your architecture accordingly.
+
+The three levels you need to internalize: **Regions** (coarse-grained geography), **Availability Zones** (fine-grained fault isolation), and **Edge Locations** (content delivery and DNS).
 
 ---
 
 ## Regions
 
-A **Region** is a geographic area containing multiple data centres. Each region is completely independent — data does not replicate between regions unless you explicitly configure it.
+A **Region** is a geographic area containing multiple, physically separated data centres. Each region is a completely independent cloud — separate power grids, separate networking, separate control planes.
+
+**Critical rule:** Data does NOT replicate between regions unless you explicitly configure it. Your us-east-1 RDS database has no automatic backup in eu-west-1. This is a feature (data sovereignty) and a responsibility (disaster recovery is your problem).
 
 | Region | Code | Notes |
 |---|---|---|
-| US East (N. Virginia) | us-east-1 | Most services launch here first |
-| US West (Oregon) | us-west-2 | Common DR pair for us-east-1 |
-| EU (Ireland) | eu-west-1 | Most popular EU region |
-| Asia Pacific (Singapore) | ap-southeast-1 | SEA hub |
-| Asia Pacific (Mumbai) | ap-south-1 | India |
+| US East (N. Virginia) | us-east-1 | Oldest, most services, cheapest prices, most traffic |
+| US West (Oregon) | us-west-2 | Standard DR pair for us-east-1 |
+| EU (Ireland) | eu-west-1 | Most popular EU region, GDPR-compliant |
+| EU (Frankfurt) | eu-central-1 | German data sovereignty requirements |
+| Asia Pacific (Singapore) | ap-southeast-1 | SEA hub, closest to Southeast Asia |
+| Asia Pacific (Tokyo) | ap-northeast-1 | Japan and Korea workloads |
+| Asia Pacific (Sydney) | ap-southeast-2 | Australia/NZ |
+| Asia Pacific (Mumbai) | ap-south-1 | India, lower latency for South Asia |
 
-**How to choose a region:**
-1. **Data residency** — legal requirements (GDPR → EU)
-2. **Latency** — closest to your users
-3. **Service availability** — new services launch in us-east-1 first
-4. **Cost** — prices vary 10–30% between regions
+**How to choose a region — decision framework:**
+
+1. **Data residency law first** — GDPR mandates EU data stays in EU. HIPAA has no mandatory region but contracts may specify. Brazil's LGPD, India's DPDP Act, and China's PIPL all have localization requirements. This is non-negotiable and must be evaluated before all other factors.
+
+2. **Latency second** — Use tools like [cloudping.info](https://cloudping.info) or AWS's own latency tests to measure round-trip time from your users' location. A user in London hitting us-east-1 adds ~80ms vs eu-west-1. For APIs this matters. For batch jobs it doesn't.
+
+3. **Service availability third** — Not every AWS service is in every region. New services launch in us-east-1 first, sometimes months before other regions. Check the [AWS Regional Services List](https://aws.amazon.com/about-aws/global-infrastructure/regional-product-services/) before architecting around a specific service.
+
+4. **Cost last** — Prices vary 10–40% between regions. us-east-1 is typically cheapest. ap-southeast-2 (Sydney) is ~20% more expensive. eu-central-1 (Frankfurt) runs ~10% above us-east-1. Use the [AWS Pricing Calculator](https://calculator.aws) to compare.
 
 ---
 
 ## Availability Zones (AZs)
 
-Each region has 2–6 **Availability Zones** — physically separate data centres within 60 miles of each other, connected by low-latency private fibre.
+Each region contains 2–6 **Availability Zones**. An AZ is one or more discrete data centres with redundant power, cooling, and networking — but physically separated from other AZs by meaningful distance (miles, not feet) to prevent correlated failures.
+
+AZs within a region are connected by AWS's private fibre network with sub-millisecond latency. This allows synchronous replication (RDS Multi-AZ) and makes distributing workloads across AZs practical.
 
 \`\`\`
 us-east-1
-├── us-east-1a  (data centre campus A)
-├── us-east-1b  (data centre campus B)
+├── us-east-1a  (data centre campus A — distinct building, power grid)
+├── us-east-1b  (data centre campus B — physically separated)
 ├── us-east-1c  (data centre campus C)
-└── us-east-1d  (data centre campus D)
+├── us-east-1d  (data centre campus D)
+├── us-east-1e  (some accounts, not always visible)
+└── us-east-1f
+
+Note: The letter (1a, 1b) is randomized per AWS account —
+your "us-east-1a" is not the same physical AZ as another account's "us-east-1a".
+This prevents everyone from picking "1a" and overloading it.
 \`\`\`
 
-**Design for AZ failure:** Spread instances across ≥2 AZs. AWS SLA for multi-AZ deployments is 99.99%.
+**How to design for AZ failure:**
+
+AZ failures happen. Not often, but they happen — power grid issues, cooling failures, networking events. Your architecture should treat an AZ outage as a routine event, not a disaster.
+
+- **EC2**: Use Auto Scaling Groups spanning ≥2 AZs with \`min-healthy-percentage=100\`
+- **RDS**: Enable Multi-AZ (creates synchronous standby in second AZ, ~60s failover)
+- **ALB**: Automatically distributes across AZs when you add subnets from multiple AZs
+- **S3**: Automatically stores objects across ≥3 AZs (you get this for free, no config)
+- **ElastiCache**: Use cluster mode with replicas in separate AZs
+- **DynamoDB**: Multi-AZ by default in all standard tables
+
+The SLA difference is stark: single-AZ EC2 is 99.9% uptime. Multi-AZ is 99.99%. That's the difference between 8.7 hours/year downtime and 52 minutes/year.
 
 ---
 
 ## Edge Locations & CloudFront
 
-AWS has 400+ **edge locations** worldwide — Points of Presence (PoPs) used by:
-- **CloudFront** (CDN) — cache content close to users
-- **Route 53** (DNS) — answer DNS queries with low latency
-- **AWS Shield** — absorb DDoS traffic
+AWS has 400+ **edge locations** (Points of Presence) in 90+ cities across 50+ countries. These are NOT regions — you don't run EC2 here. They serve two purposes:
+
+**Content Delivery (CloudFront CDN):**
+When a user in Tokyo requests your image stored in S3 in us-east-1, CloudFront serves it from the Tokyo edge location after the first request. Subsequent users get ~5ms response instead of ~150ms.
+
+**Global DNS (Route 53):**
+Route 53's DNS resolvers are distributed across edge locations. DNS queries resolve from the nearest PoP — typically under 5ms globally.
+
+**DDoS Absorption (AWS Shield):**
+Edge locations absorb volumetric DDoS attacks at the network layer before traffic reaches your origin. AWS Shield Standard is free and automatic for all customers. Shield Advanced ($3,000/month) provides 24/7 DDoS response team access.
+
+\`\`\`bash
+# Check CloudFront cache hit ratio (high = good, means edge is serving requests)
+aws cloudwatch get-metric-statistics \
+  --namespace AWS/CloudFront \
+  --metric-name CacheHitRate \
+  --dimensions Name=DistributionId,Value=EXAMPLEID \
+  --start-time $(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%S) \
+  --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \
+  --period 3600 \
+  --statistics Average
+\`\`\`
 
 ---
 
 ## Shared Responsibility Model
 
-\`\`\`
-AWS is responsible FOR the cloud:
-├── Physical security of data centres
-├── Network infrastructure
-├── Hypervisor & hardware
-└── Managed service software (RDS engine, Lambda runtime)
+The most important mental model for cloud security. AWS and the customer each own different layers — and the boundary depends on the service type.
 
-You are responsible IN the cloud:
-├── Your data (encryption, backups)
-├── OS patching (EC2 instances)
-├── IAM users and permissions
-├── Application code
-├── Security group configuration
-└── Network ACLs
+\`\`\`
+AWS is responsible FOR the cloud (the infrastructure):
+├── Physical security of data centres (no one walks in)
+├── Network infrastructure (backbone, hardware switches)
+├── Hypervisor & hardware (the physical servers)
+├── Managed service patches (RDS database engine OS, Lambda runtime)
+└── Global network DDoS protection (Shield Standard)
+
+You are responsible IN the cloud (what runs on it):
+├── Your data — encryption at rest, encryption in transit
+├── OS patching — EC2 guest OS is entirely your responsibility
+├── IAM — who has access, principle of least privilege
+├── Application code — vulnerabilities in your code
+├── Security group rules — what ports are open to whom
+├── Network ACL configuration
+├── S3 bucket policies — public access settings
+└── Backups and disaster recovery strategy
 \`\`\`
 
-> **Tip:** A misconfigured S3 bucket is your responsibility, not AWS's. The majority of cloud breaches are customer-side misconfigurations, not AWS infrastructure failures.`,
+**The responsibility line shifts with service abstraction level:**
+
+| Service | What YOU own | What AWS owns |
+|---------|-------------|---------------|
+| EC2 (IaaS) | OS, app, network config, patching | Physical hardware, hypervisor |
+| RDS (PaaS) | Data, access control, backups strategy | OS, DB engine patches, HA replication |
+| Lambda (FaaS) | Function code, IAM role | Runtime, OS, scaling, patching |
+| S3 (Object Storage) | Bucket policies, encryption, access | Durability, hardware redundancy |
+
+**The uncomfortable truth:** The vast majority of cloud security incidents are not AWS infrastructure failures — they are customer misconfigurations. Public S3 buckets with sensitive data, IAM keys checked into GitHub, EC2 instances running unpatched software. AWS can't protect you from your own configuration choices.
+
+> **Real-world example:** Capital One's 2019 breach compromised 100 million records. The attack exploited a misconfigured WAF and an overly permissive IAM role on an EC2 instance — entirely in the customer's responsibility domain. AWS's infrastructure was not compromised.`,
           interviewQuestions: [
             {
               question: "What is the AWS shared responsibility model? Give examples of what AWS vs. the customer is responsible for.",
@@ -163,25 +233,53 @@ Multi-Region: Lose entire region → failover to DR region (complex)
           ],
           content: `## AWS CLI Setup & Configuration
 
-The AWS CLI is the most powerful tool for interacting with AWS — faster than the console and scriptable.
+The AWS CLI is the fastest and most scriptable way to interact with AWS. Unlike the console (which requires clicking through menus), the CLI lets you automate repetitive tasks, script deployments, query resources across accounts, and pipe output into other tools. Every DevOps workflow eventually depends on it.
+
+## How the CLI Works
+
+When you run an AWS CLI command, it:
+1. Reads your credentials from the credential chain (environment variables → named profile → EC2 instance metadata)
+2. Signs the HTTP request using AWS Signature Version 4 (HMAC-SHA256)
+3. Sends the signed request to the regional AWS API endpoint (e.g., \`ec2.us-east-1.amazonaws.com\`)
+4. Parses the JSON response and formats it according to your \`--output\` flag
+
+Understanding this chain matters because it's the same chain the SDKs (boto3, AWS JS SDK) use — so debugging credential issues follows the same logic everywhere.
 
 ---
 
 ## Installation
 
 \`\`\`bash
-# macOS
+# macOS (Homebrew)
 brew install awscli
 
-# Linux
+# macOS (official installer — always latest)
+curl "https://awscli.amazonaws.com/AWSCLIV2.pkg" -o AWSCLIV2.pkg
+sudo installer -pkg AWSCLIV2.pkg -target /
+
+# Linux (x86_64)
 curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
 unzip awscliv2.zip
 sudo ./aws/install
 
-# Verify
+# Linux (ARM64 — e.g., Graviton EC2 or Apple Silicon rosetta)
+curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o awscliv2.zip
+unzip awscliv2.zip
+sudo ./aws/install
+
+# Windows (MSI installer)
+# Download from: https://awscli.amazonaws.com/AWSCLIV2.msi
+
+# Verify version (should be v2.x)
 aws --version
-# aws-cli/2.x.x Python/3.x.x ...
+# aws-cli/2.15.0 Python/3.11.6 Linux/5.15.0 botocore/2.x.x
+
+# Enable shell autocomplete (bash)
+echo 'complete -C /usr/local/bin/aws_completer aws' >> ~/.bashrc
+source ~/.bashrc
 \`\`\`
+
+**Why v2?** AWS CLI v2 has improved SSO support, auto-pagination, output streaming, and better error messages. If you're running v1, upgrade — v2 is the active development branch.
 
 ---
 
@@ -194,21 +292,30 @@ aws configure
 # Default region name [None]: us-east-1
 # Default output format [None]: json
 
-# This creates:
-# ~/.aws/credentials  (keys)
-# ~/.aws/config       (region + output format)
+# This writes two files:
+# ~/.aws/credentials  — contains the actual keys (sensitive, never commit this)
+# ~/.aws/config       — region, output format, and profile settings
 \`\`\`
+
+**What each setting means:**
+- \`AWS Access Key ID\` — starts with \`AKIA\` (long-term user key) or \`ASIA\` (temporary/assumed-role key)
+- \`AWS Secret Access Key\` — 40-character secret, treat like a password
+- \`Default region\` — which AWS region commands run against when you don't specify \`--region\`
+- \`Output format\` — \`json\` (machine-readable), \`table\` (human-readable), \`text\` (simple piping), \`yaml\` (new in v2)
 
 ---
 
 ## Named Profiles (Multiple Accounts)
 
+In practice, you'll work with multiple AWS accounts — separate accounts for dev, staging, and production is a security best practice. Named profiles let you switch between them without changing environment variables.
+
 \`\`\`bash
-# Configure a named profile
+# Configure separate profiles per environment
 aws configure --profile production
 aws configure --profile staging
+aws configure --profile dev
 
-# ~/.aws/credentials
+# ~/.aws/credentials — stores the keys
 [default]
 aws_access_key_id = AKIA...
 aws_secret_access_key = ...
@@ -221,98 +328,219 @@ aws_secret_access_key = ...
 aws_access_key_id = AKIA...
 aws_secret_access_key = ...
 
-# Use a profile
+# Use a specific profile for a single command
 aws s3 ls --profile production
-export AWS_PROFILE=production  # set for the session
+
+# Set profile for the entire shell session
+export AWS_PROFILE=production
+aws ec2 describe-instances  # uses production credentials
+
+# Unset to go back to default
+unset AWS_PROFILE
+
+# Verify which identity you're using (always do this before destructive ops)
+aws sts get-caller-identity
+# {
+#   "UserId": "AROAIOSFODNN7EXAMPLE:session-name",
+#   "Account": "123456789012",
+#   "Arn": "arn:aws:iam::123456789012:user/alice"
+# }
 \`\`\`
+
+**Best practice:** Set \`AWS_PROFILE\` in your shell prompt so you always know which account your commands will affect. Accidentally running a deletion command against production instead of dev is a classic and painful mistake.
 
 ---
 
 ## SSO Login (Recommended for Teams)
 
+AWS IAM Identity Center (formerly SSO) is the recommended approach for human users in organizations. Instead of long-lived access keys in \`~/.aws/credentials\`, you authenticate via your company's identity provider (Okta, Azure AD, etc.) and get short-lived credentials automatically.
+
 \`\`\`bash
-# ~/.aws/config
+# ~/.aws/config — no secrets here, just configuration
 [profile dev-account]
 sso_start_url = https://myorg.awsapps.com/start
 sso_region = us-east-1
 sso_account_id = 123456789012
 sso_role_name = DeveloperAccess
 region = us-east-1
+output = json
 
-# Login
+[profile prod-account]
+sso_start_url = https://myorg.awsapps.com/start
+sso_region = us-east-1
+sso_account_id = 999999999999
+sso_role_name = ReadOnlyAccess   # restricted in production
+region = us-east-1
+
+# Login (opens browser to identity provider)
 aws sso login --profile dev-account
+# Will open: https://myorg.awsapps.com/start#/
+# Sign in with Okta/Azure AD/Google — credentials valid for 8 hours
+
+# Now use the profile normally
 aws s3 ls --profile dev-account
+aws ec2 describe-instances --profile prod-account
+
+# List all available accounts and roles you can access
+aws sso list-accounts --access-token $(cat ~/.aws/sso/cache/*.json | jq -r '.accessToken')
 \`\`\`
+
+**Why SSO over static keys:**
+- Credentials expire automatically (8 hours default, configurable)
+- Single sign-on — one login for all accounts
+- Revocable — if someone leaves, disable their IdP account, all AWS access is gone
+- Auditable — CloudTrail shows the SSO session, not a generic access key ID
+- No credential files to accidentally push to GitHub
 
 ---
 
-## Environment Variables (for CI)
+## Environment Variables (for CI/CD)
+
+CI/CD pipelines (GitHub Actions, GitLab CI, Jenkins) cannot use \`aws configure\` because they don't have a home directory or interactive login. Environment variables are the standard approach.
 
 \`\`\`bash
+# Standard environment variables — recognized by all AWS SDKs and CLI
 export AWS_ACCESS_KEY_ID="AKIA..."
 export AWS_SECRET_ACCESS_KEY="..."
 export AWS_DEFAULT_REGION="us-east-1"
 
-# These override ~/.aws/credentials
-aws sts get-caller-identity  # verify who you are
+# For assumed roles (from sts:AssumeRole), you also need:
+export AWS_SESSION_TOKEN="IQoJ..."  # temporary token, expires in 1-12 hours
+
+# Verify the identity before running any commands
+aws sts get-caller-identity
+# Always run this at the start of CI scripts — confirms credentials work
+# and tells you which account/role you're operating as
+
+# Credential precedence (highest to lowest):
+# 1. Environment variables (AWS_ACCESS_KEY_ID, etc.)
+# 2. AWS CLI profile (AWS_PROFILE env var or --profile flag)
+# 3. ~/.aws/credentials (named profile matching [default])
+# 4. ~/.aws/config
+# 5. EC2 instance metadata / ECS task role / Lambda execution role
+\`\`\`
+
+**Security note for CI:** Use OIDC federation instead of long-lived keys whenever possible. GitHub Actions, GitLab, and CircleCI all support OIDC — your pipeline gets a short-lived token that exchanges for AWS credentials via \`sts:AssumeRoleWithWebIdentity\`. No keys to rotate, no keys to leak.
+
+\`\`\`yaml
+# GitHub Actions OIDC example (no static keys needed):
+- uses: aws-actions/configure-aws-credentials@v4
+  with:
+    role-to-assume: arn:aws:iam::123456789012:role/GitHubActionsRole
+    aws-region: us-east-1
+    # Automatically calls sts:AssumeRoleWithWebIdentity
+    # Credentials are scoped to this workflow run and expire
 \`\`\`
 
 ---
 
 ## Querying with JMESPath & jq
 
+The \`--query\` flag uses JMESPath — a query language for JSON. Mastering it saves enormous time when scripting.
+
 \`\`\`bash
-# List all EC2 instances with Name tag and state
+# List all EC2 instances with key fields (JMESPath)
 aws ec2 describe-instances \
   --query 'Reservations[*].Instances[*].{
     Name: Tags[?Key==\`Name\`]|[0].Value,
     ID: InstanceId,
     State: State.Name,
     Type: InstanceType,
+    AZ: Placement.AvailabilityZone,
     IP: PublicIpAddress
   }' \
   --output table
 
-# Get just running instance IDs
-aws ec2 describe-instances \
+# Get only running instance IDs (for use in scripts)
+RUNNING_IDS=$(aws ec2 describe-instances \
   --filters "Name=instance-state-name,Values=running" \
   --query 'Reservations[*].Instances[*].InstanceId' \
-  --output text
+  --output text)
+echo "Running: $RUNNING_IDS"
 
-# List S3 buckets sorted by creation date (jq)
+# JMESPath sort and filter — find largest EBS volumes
+aws ec2 describe-volumes \
+  --query 'sort_by(Volumes, &Size)[-5:].{ID:VolumeId,Size:Size,State:State}' \
+  --output table
+
+# List S3 buckets sorted by creation date (piping to jq)
 aws s3api list-buckets \
   | jq '.Buckets | sort_by(.CreationDate) | .[] | .Name'
 
-# Check costs for last 7 days
+# Find all Lambda functions with memory over 512MB (jq filter)
+aws lambda list-functions \
+  | jq '.Functions[] | select(.MemorySize > 512) | {Name:.FunctionName, Memory:.MemorySize}'
+
+# Check costs for last 7 days with daily breakdown
 aws ce get-cost-and-usage \
-  --time-period Start=2024-01-01,End=2024-01-08 \
+  --time-period Start=$(date -d '7 days ago' +%Y-%m-%d),End=$(date +%Y-%m-%d) \
   --granularity DAILY \
   --metrics BlendedCost \
   --query 'ResultsByTime[*].{Date:TimePeriod.Start,Cost:Total.BlendedCost.Amount}' \
   --output table
 \`\`\`
 
+**JMESPath quick reference:**
+- \`Reservations[*]\` — all elements of array
+- \`Instances[0]\` — first element
+- \`Tags[?Key==\`Name\`]|[0].Value\` — filter by key, get value
+- \`sort_by(@, &Size)\` — sort by field
+- \`[-5:]\` — last 5 elements
+
 ---
 
 ## Useful CLI Tricks
 
 \`\`\`bash
-# Auto-complete
-aws s3 <TAB><TAB>
+# Check permissions before running (dry run — EC2 specific)
+aws ec2 run-instances --dry-run \
+  --image-id ami-12345 \
+  --instance-type t3.micro
+# Returns: DryRunOperation — you have permission
+# Or: UnauthorizedOperation — you don't
 
-# Paginate (auto-handles next tokens)
-aws ec2 describe-instances --no-paginate  # dump all pages
-
-# Dry run (check permissions without action)
-aws ec2 run-instances --dry-run ...
-
-# Wait for an operation to complete
+# Wait for async operations (blocks until complete)
 aws ec2 wait instance-running --instance-ids i-1234567890abcdef0
+aws ec2 wait image-available --image-ids ami-12345
+aws cloudformation wait stack-create-complete --stack-name my-stack
+# Useful in scripts to avoid polling loops
+
+# Auto-pagination — fetches ALL pages automatically
+# Without --no-paginate, large result sets are truncated
+aws ec2 describe-instances --no-paginate  # get all instances
+
+# Output to file for large responses
+aws ec2 describe-instances --output json > all-instances.json
+
+# Get current account ID (useful in scripts)
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+echo "Account: $ACCOUNT_ID"
+
+# Get current region from instance metadata (on EC2)
+REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
+
+# Enable debug mode (see raw HTTP requests/responses)
+aws s3 ls --debug 2>&1 | head -50
+
+# CLI output to clipboard (macOS)
+aws ec2 describe-instances --output table | pbcopy
 
 # Get help for any command
-aws s3 cp help
-aws ec2 describe-instances help
-\`\`\``,
+aws s3 cp help          # shows all flags for s3 cp
+aws ec2 run-instances help   # exhaustive option list
+\`\`\`
+
+---
+
+## Common Pitfalls
+
+**Accidentally targeting the wrong account or region:** Always run \`aws sts get-caller-identity\` before destructive operations. Consider adding it as the first line of deployment scripts.
+
+**Region mismatch:** The CLI uses your configured default region unless you specify \`--region\`. If your resource is in eu-west-1 and your default is us-east-1, commands return empty results — not errors. Always specify \`--region\` in scripts.
+
+**Credential caching with SSO:** SSO credentials cache in \`~/.aws/sso/cache/\`. If you get "Token expired" errors, run \`aws sso login --profile your-profile\` again.
+
+**Output format in scripts:** Use \`--output text\` for simple values (easier to assign to variables), \`--output json\` when you need to process structured data with jq. The \`--output table\` format is only for humans — never parse table output in scripts.`,
         },
         {
           id: "iam-deep-dive",
@@ -329,24 +557,70 @@ aws ec2 describe-instances help
           ],
           content: `## IAM Deep Dive
 
-IAM (Identity and Access Management) controls *who* can do *what* to *which* AWS resources.
+IAM (Identity and Access Management) is AWS's authorization system — it controls *who* can do *what* to *which* AWS resources. Get IAM wrong and you either expose your entire AWS account or lock out legitimate users. Get it right and it becomes your most powerful security control.
+
+## Why IAM Is Complex (and Why That Complexity Matters)
+
+IAM isn't just "give this user permission to do X." In a real organization, you have hundreds of developers, dozens of services, multiple AWS accounts, CI/CD pipelines, third-party SaaS tools, and automated processes — all needing different, precisely scoped access. IAM handles all of this through a layered evaluation model.
+
+The mental model: **everything is denied by default**. A request to AWS must have an explicit Allow from at least one policy, AND no explicit Deny from any policy, to succeed.
+
+---
+
+## How IAM Policy Evaluation Works (The Algorithm)
+
+This is critical knowledge for both debugging and designing secure systems:
+
+\`\`\`
+Request arrives → IAM evaluates in this order:
+
+1. SCP (Service Control Policy) — Does the Organization ALLOW this action?
+   → If no Allow in SCP: DENY immediately (cannot be overridden)
+
+2. Resource-based policy — Does the resource (S3 bucket, KMS key) ALLOW this principal?
+   → For same-account: Allow here can be sufficient
+   → For cross-account: BOTH resource policy AND identity policy must Allow
+
+3. IAM Permissions Boundary — Does the boundary ALLOW this action?
+   → Boundaries cap maximum permissions; they don't grant anything
+   → Identity policy: {S3:*, EC2:*, IAM:*} + Boundary: {S3:*, EC2:*} = {S3:*, EC2:*}
+
+4. Identity-based policy — Does the IAM user/role's policy ALLOW this?
+   → The main policy you think of when you think "IAM policy"
+
+5. Session policy — Is this assumed-role session further restricted?
+   → Used when calling sts:AssumeRole with an inline policy
+
+6. Explicit Deny — Does ANY policy DENY this action?
+   → DENY wins over ALL Allows, no exceptions
+   → An SCP with Deny can block even the root account user
+\`\`\`
+
+**The practical implication:** When someone gets AccessDenied, there are 6 places to check, not 1. The \`iam simulate-principal-policy\` command is your best friend for debugging.
 
 ---
 
 ## Core Concepts
 
 \`\`\`
-Users    → individual people or service accounts (long-term credentials)
-Groups   → collections of users sharing the same permissions
-Roles    → assumed identities (EC2, Lambda, CI, cross-account)
-Policies → JSON documents defining Allow/Deny rules
+Users    → individual people or service accounts (long-term credentials, avoid in favor of SSO/roles)
+Groups   → collections of users sharing permissions (no direct permissions — policies attach to groups)
+Roles    → assumed identities with temporary credentials (EC2, Lambda, CI/CD, cross-account)
+Policies → JSON documents defining Allow/Deny rules — attached to users, groups, or roles
 \`\`\`
 
+**IAM Principals hierarchy:**
+- **Root user** — unrestricted access, should be locked away with hardware MFA, never used day-to-day
+- **IAM users** — long-lived credentials, acceptable for human users without SSO, avoid for services
+- **IAM roles** — temporary credentials via STS, the correct choice for all service-to-service and CI/CD access
+- **Federated identities** — external users (SAML, OIDC) who assume roles without an IAM user
+
 **Always prefer Roles over Users for:**
-- EC2 instances (instance profiles)
-- Lambda functions
-- GitHub Actions (OIDC)
-- Cross-account access
+- EC2 instances (use instance profiles — no keys in the instance)
+- Lambda functions (execution roles — no keys in function code)
+- GitHub Actions, GitLab CI (OIDC federation — no keys stored anywhere)
+- Cross-account access (assume a role in the target account)
+- ECS tasks (task roles — separate from the EC2 node role)
 
 ---
 
@@ -490,7 +764,134 @@ aws s3 ls --profile prod-deploy
 
 ---
 
+## Advanced IAM: OIDC Federation for GitHub Actions
+
+The modern approach for CI/CD: no long-lived keys, no secrets to rotate, no risk of credential leakage.
+
+\`\`\`bash
+# Step 1: Create the OIDC provider for GitHub Actions
+aws iam create-open-id-connect-provider \
+  --url https://token.actions.githubusercontent.com \
+  --client-id-list sts.amazonaws.com \
+  --thumbprint-list 6938fd4d98bab03faadb97b34396831e3780aea1
+
+# Step 2: Create a role with a trust policy tied to your GitHub org/repo
+cat > github-trust-policy.json << 'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": {
+      "Federated": "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com"
+    },
+    "Action": "sts:AssumeRoleWithWebIdentity",
+    "Condition": {
+      "StringEquals": {
+        "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+      },
+      "StringLike": {
+        "token.actions.githubusercontent.com:sub": "repo:myorg/myrepo:*"
+        // Restrict to specific branches: "repo:myorg/myrepo:ref:refs/heads/main"
+      }
+    }
+  }]
+}
+EOF
+
+aws iam create-role \
+  --role-name GitHubActionsDeployRole \
+  --assume-role-policy-document file://github-trust-policy.json
+
+aws iam attach-role-policy \
+  --role-name GitHubActionsDeployRole \
+  --policy-arn arn:aws:iam::aws:policy/AmazonECS_FullAccess  # scope down for prod
+\`\`\`
+
+\`\`\`yaml
+# .github/workflows/deploy.yml — no AWS keys needed
+- uses: aws-actions/configure-aws-credentials@v4
+  with:
+    role-to-assume: arn:aws:iam::123456789012:role/GitHubActionsDeployRole
+    aws-region: us-east-1
+    # GitHub sends a signed JWT, AWS STS verifies it and returns 1-hour credentials
+    # Nothing stored, nothing to rotate, nothing to leak
+\`\`\`
+
+---
+
+## Permission Boundaries (Delegated Administration)
+
+Permission boundaries solve the problem of letting developers create IAM roles for their services without allowing them to grant themselves unlimited permissions.
+
+\`\`\`json
+// Create this as the boundary policy:
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": [
+      "s3:*",
+      "dynamodb:*",
+      "lambda:*",
+      "logs:*"
+    ],
+    "Resource": "*"
+  }]
+}
+\`\`\`
+
+\`\`\`bash
+# Attach as permission boundary when creating roles:
+aws iam create-role \
+  --role-name my-service-role \
+  --assume-role-policy-document file://trust.json \
+  --permissions-boundary arn:aws:iam::123456789012:policy/DeveloperBoundary
+
+# Now even if the developer attaches AdministratorAccess to this role,
+# the boundary restricts it to only S3, DynamoDB, Lambda, and CloudWatch Logs.
+# They cannot grant themselves EC2, IAM, or billing access.
+\`\`\`
+
+**Real-world use:** Netflix uses permission boundaries to let application teams create their own service roles without a centralized IAM team becoming a bottleneck for every service's deployment.
+
+---
+
+## Service Control Policies (SCPs)
+
+SCPs apply at the AWS Organizations level — they're guardrails on entire accounts or organizational units.
+
+\`\`\`bash
+# SCP: Deny creation of non-encrypted S3 buckets across entire organization
+aws organizations create-policy \
+  --type SERVICE_CONTROL_POLICY \
+  --name "RequireS3Encryption" \
+  --description "Block creation of unencrypted S3 buckets" \
+  --content '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Sid": "DenyUnencryptedS3",
+      "Effect": "Deny",
+      "Action": "s3:CreateBucket",
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "s3:x-amz-server-side-encryption": ["AES256", "aws:kms"]
+        }
+      }
+    }]
+  }'
+
+# SCP: Lock resources to specific regions (data sovereignty)
+# This prevents anyone in the account from launching EC2 in unauthorized regions
+\`\`\`
+
+**SCPs vs IAM policies:** SCPs do NOT grant permissions — they only restrict. Even an account root user cannot override an SCP Deny. SCPs are the ultimate guardrail for multi-account organizations.
+
+---
+
 ## IAM Access Analyzer
+
+Access Analyzer identifies resources (S3 buckets, IAM roles, KMS keys) that are accessible from outside your account or organization — potential unintended public exposure.
 
 \`\`\`bash
 # Create an analyzer
@@ -504,12 +905,32 @@ aws accessanalyzer list-findings \
   --query 'findings[*].{Resource:resource,Type:resourceType,Status:status}' \
   --output table
 
-# Generate least-privilege policy from CloudTrail events
+# Generate least-privilege policy from actual CloudTrail usage
+# This is the most powerful feature — it reads what actions were actually called
+# and generates a minimal policy covering exactly that usage
 aws accessanalyzer generate-policy \
   --trail-arn arn:aws:cloudtrail:us-east-1:123456789012:trail/my-trail
+
+# Validate a policy document for syntax and security issues
+aws accessanalyzer validate-policy \
+  --policy-type IDENTITY_POLICY \
+  --policy-document file://my-policy.json \
+  --query 'findings[*].{Issue:issueCode,Severity:findingType,Details:learnMoreLink}'
 \`\`\`
 
-> **Tip:** The AWS Security Reference Architecture (SRA) recommends a dedicated **security tooling account** with cross-account read access. Never run security tooling in the same account as production workloads.`,
+---
+
+## Common IAM Pitfalls
+
+**Wildcard resources in production policies:** \`"Resource": "*"\` means the permission applies to every resource of that type across your entire account. Use specific ARNs or ARN patterns (\`arn:aws:s3:::myapp-*/*\`) instead.
+
+**Confusing execution role and task role in ECS/Lambda:** The execution role is used by the AWS infrastructure (to pull images, write logs). The task role is used by your application code (to access DynamoDB, S3). Many developers attach application permissions to the execution role and wonder why their app can't call DynamoDB.
+
+**Stale IAM users:** Long-lived access keys that aren't used for 90+ days are a significant security risk. Enable AWS Config rule \`iam-user-unused-credentials-check\` and automate disabling of inactive keys.
+
+**Not enabling CloudTrail:** Without CloudTrail, you have no audit trail of what IAM calls were made. Enable CloudTrail organization-wide as the first thing you do in a new account.
+
+> **Tip:** The AWS Security Reference Architecture (SRA) recommends a dedicated **security tooling account** with cross-account read access. Never run security tooling in the same account as production workloads. GuardDuty, Security Hub, and Config should all aggregate findings into a central security account.`,
           interviewQuestions: [
             {
               question: "What is the difference between an IAM role and an IAM user? When should you use each?",
@@ -623,7 +1044,84 @@ aws iam simulate-principal-policy \\
           ],
           content: `## EC2 Fundamentals
 
-EC2 (Elastic Compute Cloud) provides resizable virtual machines in the cloud.
+EC2 (Elastic Compute Cloud) provides resizable virtual machines in AWS. Despite the rise of containers and serverless, EC2 remains the most widely used AWS compute service — and understanding it deeply is essential because ECS, EKS, and many managed services run on EC2 under the hood.
+
+## How EC2 Works Internally
+
+When you launch an EC2 instance, AWS:
+1. Selects a physical host server in the AZ you specified
+2. Creates a virtual machine using the Nitro hypervisor (AWS's custom hardware-based hypervisor, offering near bare-metal performance)
+3. Attaches network interfaces (ENIs) with IPs from your subnet's CIDR
+4. Attaches EBS volumes over the NVMe-over-fabric network (appears as a local disk)
+5. Makes the instance metadata service (IMDS) available at \`169.254.169.254\`
+6. Runs your User Data script as root
+
+**The Nitro System** is important to understand: AWS replaced the Xen hypervisor with Nitro in 2017. Nitro offloads hypervisor functions to dedicated hardware, meaning your EC2 instance gets near-100% of the host's CPU and memory. A c5.xlarge with 4 vCPUs gets genuine 4 vCPUs, not virtualized overhead.
+
+## EC2 Instance Families — When to Use Each
+
+\`\`\`
+T-family (t3, t4g): Burstable CPU — CPU credits accumulate during idle time
+  Use for: dev/test, low-traffic web servers, microservices with variable load
+  Avoid for: sustained 100% CPU workloads (you'll exhaust credits and throttle)
+  t4g uses ARM Graviton3 (20% cheaper, often faster for web workloads)
+
+M-family (m6i, m7g): General purpose — balanced CPU/memory ratio (1:4)
+  Use for: app servers, web backends, small databases
+  m7g (Graviton3) is the best general-purpose choice for most new workloads
+
+C-family (c6i, c7g): Compute optimized — high CPU, less memory (1:2 ratio)
+  Use for: CPU-intensive compute, batch processing, gaming servers, ad serving
+  c6i is Intel Ice Lake; c6a is AMD EPYC (10% cheaper than c6i, similar performance)
+
+R-family (r6i, r7g): Memory optimized — high memory (1:8 ratio)
+  Use for: in-memory databases (Redis), SAP HANA, large caches, ML inference
+
+I-family (i3, i4i): Storage optimized — local NVMe SSD
+  Use for: databases needing very low latency I/O (Cassandra, MongoDB, MySQL)
+  Note: local NVMe is ephemeral — lost when instance stops. Use for temp data or replicated data
+
+G-family (g4dn, g5): GPU compute — NVIDIA T4/A10G
+  Use for: ML inference, video encoding, graphics rendering, CUDA workloads
+
+P-family (p3, p4d): GPU training — NVIDIA V100/A100
+  Use for: ML/DL training, scientific simulation (most powerful and most expensive)
+
+X-family (x1e, x2gd): Extreme memory — up to 24TB RAM
+  Use for: SAP HANA, large in-memory analytics, very large caches
+\`\`\`
+
+## EC2 Purchasing Options — Cost Optimization
+
+\`\`\`
+On-Demand:
+  Pay by the second (Linux) or hour (Windows)
+  No commitment, highest price
+  Use for: unpredictable workloads, dev/test, short-lived jobs
+
+Reserved Instances (Standard/Convertible):
+  1-year or 3-year commitment → 30-60% savings vs On-Demand
+  Standard: locked to instance family/region (best savings, least flexible)
+  Convertible: can change instance type within family (fewer savings, more flexible)
+  Use for: steady-state production workloads you'll run 24/7 for 12+ months
+
+Savings Plans (Compute/EC2):
+  Commitment to $ per hour, flexible across instance types, AZs, regions
+  Compute Savings Plans: apply to EC2, Fargate, Lambda (most flexible)
+  Use for: mixed compute workloads where instance types vary
+
+Spot Instances:
+  Use spare EC2 capacity → up to 90% savings
+  AWS can reclaim with 2-minute warning (Spot interruption)
+  Use for: fault-tolerant batch jobs, ML training, CI/CD build agents
+  Avoid for: databases, anything that can't handle sudden termination
+  Spot capacity pools by AZ and instance type — use Spot Fleet for diversification
+
+Dedicated Hosts:
+  Physical server reserved for your account
+  Required for: BYOL (Bring Your Own License) for Oracle, Windows Server
+  Use for: compliance requirements (dedicated hardware), software licensing
+\`\`\`
 
 ---
 
@@ -763,13 +1261,92 @@ aws autoscaling set-desired-capacity \
 
 ---
 
+## Instance Metadata Service (IMDS)
+
+The IMDS is an HTTP endpoint available at \`169.254.169.254\` from inside every EC2 instance. It provides instance identity, network configuration, and — critically — temporary credentials from the attached IAM role.
+
+\`\`\`bash
+# Inside an EC2 instance:
+
+# Get instance ID
+curl http://169.254.169.254/latest/meta-data/instance-id
+
+# Get the current region
+curl http://169.254.169.254/latest/meta-data/placement/region
+
+# Get IAM role credentials (used by AWS SDKs automatically)
+curl http://169.254.169.254/latest/meta-data/iam/security-credentials/EC2AppRole
+# Returns: AccessKeyId, SecretAccessKey, Token (expiring, auto-rotated)
+
+# IMDSv2 (more secure — requires a token, prevents SSRF attacks)
+TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" \
+  -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+curl -H "X-aws-ec2-metadata-token: $TOKEN" \
+  http://169.254.169.254/latest/meta-data/instance-id
+\`\`\`
+
+**IMDSv2 is important:** The 2019 Capital One breach involved an SSRF attack that used the IMDS to steal IAM credentials from an EC2 instance. IMDSv2 adds a token requirement that makes SSRF-based credential theft much harder. Enforce IMDSv2:
+
+\`\`\`bash
+# Require IMDSv2 (disables v1) on a running instance
+aws ec2 modify-instance-metadata-options \
+  --instance-id $INSTANCE_ID \
+  --http-endpoint enabled \
+  --http-tokens required  # 'optional' allows v1, 'required' enforces v2
+
+# Enforce at launch via Launch Template
+aws ec2 create-launch-template \
+  --launch-template-name my-app-lt \
+  --launch-template-data '{
+    "MetadataOptions": {
+      "HttpEndpoint": "enabled",
+      "HttpTokens": "required"
+    }
+  }'
+\`\`\`
+
+---
+
+## Placement Groups
+
+Placement groups control how instances are physically placed on hardware — important for performance and availability.
+
+\`\`\`bash
+# Cluster placement group: all instances on same rack
+# Lowest latency (sub-millisecond), 10/25 Gbps enhanced networking
+# Risk: single rack failure takes all instances
+aws ec2 create-placement-group \
+  --group-name hpc-cluster \
+  --strategy cluster
+# Use for: HPC, MPI workloads, ML training with NVLink, low-latency trading
+
+# Spread placement group: each instance on different rack
+# Maximum isolation — rack failure only kills one instance
+aws ec2 create-placement-group \
+  --group-name critical-services \
+  --strategy spread
+# Use for: small groups of critical instances you can't afford to lose simultaneously
+# Limit: max 7 instances per AZ per group
+
+# Partition placement group: groups of instances, each group on different rack
+aws ec2 create-placement-group \
+  --group-name cassandra-cluster \
+  --strategy partition \
+  --partition-count 3
+# Use for: distributed storage (HDFS, Cassandra, Kafka) where you want rack awareness
+\`\`\`
+
+---
+
 ## Common CLI Operations
 
 \`\`\`bash
 # Stop / start / terminate
-aws ec2 stop-instances --instance-ids \$INSTANCE_ID
-aws ec2 start-instances --instance-ids \$INSTANCE_ID
-aws ec2 terminate-instances --instance-ids \$INSTANCE_ID
+aws ec2 stop-instances --instance-ids $INSTANCE_ID
+aws ec2 start-instances --instance-ids $INSTANCE_ID
+aws ec2 terminate-instances --instance-ids $INSTANCE_ID
+# Note: stop preserves the instance (data on EBS volumes survives)
+# terminate destroys it permanently (EBS deleted unless DeleteOnTermination=false)
 
 # List all instances in a table
 aws ec2 describe-instances \
@@ -778,14 +1355,41 @@ aws ec2 describe-instances \
     ID:InstanceId,State:State.Name,Type:InstanceType,AZ:Placement.AvailabilityZone
   }' --output table
 
-# Get instance type pricing
+# Find all instances with no Name tag (common hygiene issue)
+aws ec2 describe-instances \
+  --query 'Reservations[*].Instances[?!Tags || !Tags[?Key==\`Name\`]].InstanceId' \
+  --output text
+
+# Get current spot prices
 aws ec2 describe-spot-price-history \
-  --instance-types t3.micro t3.small \
+  --instance-types m5.xlarge m5.2xlarge \
   --product-descriptions "Linux/UNIX" \
   --start-time $(date -u +"%Y-%m-%dT%H:%M:%S") \
   --query 'SpotPriceHistory[*].{Type:InstanceType,Price:SpotPrice,AZ:AvailabilityZone}' \
   --output table
-\`\`\``,
+
+# Describe instance type specs (vCPU, memory, network)
+aws ec2 describe-instance-types \
+  --instance-types m5.xlarge c5.xlarge r5.xlarge \
+  --query 'InstanceTypes[*].{
+    Type:InstanceType,
+    vCPU:VCpuInfo.DefaultVCpus,
+    MemoryGiB:MemoryInfo.SizeInMiB,
+    NetworkGbps:NetworkInfo.NetworkPerformance
+  }' --output table
+\`\`\`
+
+---
+
+## Common EC2 Pitfalls
+
+**Using t3 in production under sustained CPU load:** T-family instances earn CPU credits when idle and spend them under load. When credits are exhausted, CPU is throttled to 5-20% of baseline. Monitor \`CPUCreditBalance\` in CloudWatch. If it consistently hits zero, switch to a fixed-performance family (m5, c5).
+
+**Forgetting to configure DeleteOnTermination for EBS:** By default the root volume is deleted on termination, but additional volumes are not. Check your launch configuration and ensure you're not accumulating unattached EBS volumes.
+
+**Ignoring Spot interruptions in batch processing:** Spot instances can be reclaimed with only a 2-minute warning. Use spot interruption handlers (check \`http://169.254.169.254/latest/meta-data/spot/termination-time\`) to checkpoint work before the instance is taken.
+
+**Not using the Nitro-based instance types:** Older instance types (t2, m4, c4) use the legacy Xen hypervisor and have lower EBS and network performance ceilings. Always prefer the current generation (t3/t4g, m5/m6i/m7g, c5/c6i) for new workloads.`,
         },
         {
           id: "lambda-serverless",
@@ -801,7 +1405,65 @@ aws ec2 describe-spot-price-history \
           ],
           content: `## Lambda & Serverless
 
-Lambda runs your code in response to events without provisioning servers. You pay per invocation and duration (rounded to 1ms).
+Lambda is AWS's Function-as-a-Service (FaaS) platform. You write code, Lambda handles everything else — servers, OS, runtime, scaling, and high availability. You pay per invocation and per millisecond of execution time. At zero traffic, you pay nothing.
+
+## How Lambda Works Under the Hood
+
+When Lambda receives an invocation request, here's what happens:
+
+\`\`\`
+1. Request arrives → Lambda Service picks it up
+
+2. Check for warm execution environment:
+   - Warm: your handler is invoked immediately (~1ms overhead)
+   - Cold: proceed to steps 3-5 (adds latency)
+
+3. Cold start:
+   a. Provision a microVM (Firecracker — AWS's open-source microVM)
+   b. Download your deployment package (from S3)
+   c. Start the runtime (Node.js, Python, Java JVM, etc.)
+   d. Run your INIT code (code outside the handler function)
+   e. Invoke your handler
+
+4. After invocation: environment kept alive for ~5-15 minutes
+   - Next invocation within this window = warm start (reuses everything)
+   - init code does NOT re-run on warm invocations
+   - Global variables, DB connections persist between warm invocations
+\`\`\`
+
+**Lambda Execution Model:**
+\`\`\`
+Each concurrent invocation = separate execution environment
+100 simultaneous requests = 100 environments (if none are warm)
+                          = potentially 100 cold starts
+
+Lambda concurrency limits:
+- Default: 1,000 concurrent executions per account per region
+- Reserved concurrency: cap a function to N concurrent (protect downstream systems)
+- Provisioned concurrency: pre-warm N environments (eliminates cold starts, costs $)
+\`\`\`
+
+**Memory and CPU:** Lambda allocates CPU proportionally to memory. At 128MB you get ~0.1 vCPU. At 1,769MB you get exactly 1 full vCPU. At 3,008MB you get ~1.7 vCPU. For CPU-intensive work, increase memory even if you don't need the RAM — you get more CPU.
+
+## Cold Starts in Detail
+
+Cold start latency depends on runtime and package size:
+
+| Runtime | Typical Cold Start | Notes |
+|---------|-------------------|-------|
+| Node.js (18/20) | 100–300ms | Fast, V8 JIT helps |
+| Python (3.11/3.12) | 100–400ms | Fast for small packages |
+| Go | 50–100ms | Fastest startup |
+| Java (Corretto 17) | 1,000–3,000ms | JVM startup is slow |
+| Java with SnapStart | 200–500ms | JVM snapshot at publish time |
+| .NET (dotnet8) | 300–800ms | Moderate |
+
+**Strategies to minimize cold starts:**
+1. **Provisioned Concurrency** — pre-warms N environments, you pay whether invoked or not
+2. **Lambda SnapStart** (Java only) — snapshots initialized JVM, restores on cold start
+3. **Smaller packages** — less to download and parse
+4. **Keep init code minimal** — heavy imports outside handler still run on cold start
+5. **Stay in a single runtime** — mixing runtimes in a Layer can cause re-initialization
 
 ---
 
@@ -922,13 +1584,62 @@ aws lambda update-function-configuration \
 
 ---
 
+## Lambda Destinations and Error Handling
+
+\`\`\`bash
+# Configure async invocation destinations (where to send success/failure)
+aws lambda put-function-event-invoke-config \
+  --function-name my-processor \
+  --maximum-retry-attempts 2 \
+  --maximum-event-age-in-seconds 3600 \
+  --destination-config '{
+    "OnSuccess": {
+      "Destination": "arn:aws:sqs:us-east-1:123456789012:success-queue"
+    },
+    "OnFailure": {
+      "Destination": "arn:aws:sqs:us-east-1:123456789012:dead-letter-queue"
+    }
+  }'
+# Async invocations retry up to 2 times automatically
+# After all retries, the event goes to the failure destination
+# Destinations are better than Dead Letter Queues (DLQs) — they include the response
+\`\`\`
+
+---
+
+## Concurrency Control
+
+\`\`\`bash
+# Reserved concurrency: cap this function to 100 concurrent executions
+# Protects downstream services (DB, API) from Lambda fan-out
+aws lambda put-function-concurrency \
+  --function-name my-api-handler \
+  --reserved-concurrent-executions 100
+# Side effect: this function cannot exceed 100, even if account limit is 1000
+# Setting to 0 effectively disables the function (useful for emergency shutoff)
+
+# Provisioned concurrency: pre-warm 10 execution environments
+# These stay warm, eliminating cold starts for these 10 concurrent invocations
+aws lambda put-provisioned-concurrency-config \
+  --function-name my-api-handler \
+  --qualifier production \  # attach to alias, not $LATEST
+  --provisioned-concurrent-executions 10
+# Cost: you pay for 10 environments whether or not they're invoked
+
+# Check concurrency usage
+aws lambda get-account-settings \
+  --query '{TotalConcurrency:AccountLimit.ConcurrentExecutions,UnreservedConcurrency:AccountLimit.UnreservedConcurrentExecutions}'
+\`\`\`
+
+---
+
 ## Monitoring & Debugging
 
 \`\`\`bash
-# Tail live logs
+# Tail live logs (very useful during development)
 aws logs tail /aws/lambda/my-api-handler --follow
 
-# Get last 5 minutes of logs
+# Get last 5 minutes of error logs
 aws logs filter-log-events \
   --log-group-name /aws/lambda/my-api-handler \
   --start-time $(date -d '5 minutes ago' +%s)000 \
@@ -943,7 +1654,34 @@ aws cloudwatch get-metric-statistics \
   --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \
   --period 60 \
   --statistics Maximum
+
+# Lambda Power Tuning — find optimal memory for cost vs speed
+# Run the open-source AWS Lambda Power Tuning tool (Step Functions state machine)
+# It runs your function at different memory levels and plots cost/performance
+# Typical finding: a function at 128MB might be 3x slower but 2x more expensive
+# than the same function at 512MB (because it runs 3x longer)
+
+# Check init duration (cold start time) in logs
+aws logs filter-log-events \
+  --log-group-name /aws/lambda/my-api-handler \
+  --filter-pattern "REPORT" \
+  --query 'events[*].message' \
+  --output text | grep "Init Duration"
+# REPORT: Duration: 234ms | Init Duration: 312ms ← cold start happened
+# REPORT: Duration: 12ms  ← no Init Duration = warm start
 \`\`\`
+
+---
+
+## Lambda Common Pitfalls
+
+**Opening DB connections inside the handler:** Every cold start AND every warm invocation opens a new connection. A Lambda function under load can exhaust your RDS connection pool in seconds. Always open the connection outside the handler (in the init phase) so it's reused across warm invocations. Or better, use **RDS Proxy** which pools connections on your behalf.
+
+**Lambda inside a VPC without a NAT Gateway:** Lambda in a VPC cannot reach the internet (for external APIs) or AWS services without either a NAT Gateway or VPC endpoints. Many developers are surprised to find their Lambda can't call the Stripe API or SendGrid because they added it to a VPC for RDS access without thinking about outbound connectivity.
+
+**Memory/timeout defaults:** Default memory is 128MB and default timeout is 3 seconds. Both are far too low for most real workloads. Set memory based on your function's needs and test timeout by timing actual invocations.
+
+**Not pinning function versions in production:** If your ECS task or API Gateway references \`$LATEST\`, any code update immediately affects production with no canary period. Use versioned aliases (\`production\`, \`staging\`) and deploy to staging first.
 
 > **Tip:** Use **Provisioned Concurrency** for latency-sensitive APIs — it pre-warms Lambda instances and eliminates cold starts. Enable it for your \`production\` alias, not the function itself, so it doesn't slow deployments.`,
           interviewQuestions: [
@@ -1072,7 +1810,74 @@ Use for: Databases, high-compute ML training, workloads needing specific hardwar
           ],
           content: `## S3 Deep Dive
 
-S3 (Simple Storage Service) provides object storage with 11 nines (99.999999999%) of durability.
+S3 (Simple Storage Service) is one of AWS's oldest and most foundational services. It provides object storage with 11 nines (99.999999999%) of durability and effectively unlimited capacity. Understanding S3 deeply saves you money, prevents security incidents, and unlocks patterns unavailable in traditional file systems.
+
+## How S3 Stores Data Internally
+
+When you upload an object to S3, AWS:
+1. Breaks it into chunks using **erasure coding** (similar to RAID 6, not just replication)
+2. Distributes chunks across **≥3 Availability Zones** in the bucket's region
+3. Confirms write to all AZs before returning HTTP 200 (strong consistency)
+4. Stores redundant metadata in a distributed key-value store
+
+This means:
+- An entire AZ can fail and your objects remain 100% available
+- Durability (11 nines) means losing 1 object out of 100 billion every 1,000 years
+- **S3 has been strongly consistent since December 2020** — prior to this, overwrite PUTs had eventual consistency (a common gotcha in older tutorials). Today, every read-after-write is immediately consistent.
+
+**S3 is NOT a filesystem:** Objects are immutable (no append). "Folders" don't exist — they're just common prefixes in key names. There's no file locking. These differences matter when choosing S3 vs EBS vs EFS.
+
+## S3 Storage Classes — Choosing the Right Tier
+
+S3 offers 7 storage classes with different cost/availability/retrieval tradeoffs:
+
+\`\`\`
+S3 Standard:
+  Price: ~$0.023/GB/month
+  Retrieval: Milliseconds, free
+  Availability: 99.99%
+  Min duration: None
+  Use for: Actively accessed data, content distribution, static websites
+
+S3 Intelligent-Tiering:
+  Price: $0.023/GB/month + $0.00025/1000 objects monitoring fee
+  Retrieval: Milliseconds (frequent/infrequent), free
+  Auto-moves objects between tiers based on access patterns
+  Use for: Data with unpredictable or changing access patterns
+  Not ideal for: Objects < 128KB (monitoring fee exceeds savings)
+
+S3 Standard-IA (Infrequent Access):
+  Price: ~$0.0125/GB/month storage, $0.01/GB retrieval
+  Availability: 99.9%
+  Min duration: 30 days (charged even if deleted sooner)
+  Use for: Backups, disaster recovery data, monthly reports
+
+S3 One Zone-IA:
+  Price: ~$0.01/GB/month
+  Stored in ONE AZ only (99.5% availability)
+  Use for: Reproducible data (thumbnails, transcoded video) where recreation is cheap
+  Avoid for: Primary backups (AZ failure = data loss)
+
+S3 Glacier Instant Retrieval:
+  Price: ~$0.004/GB/month
+  Retrieval: Milliseconds, $0.03/GB retrieval fee
+  Min duration: 90 days
+  Use for: Archive data accessed once per quarter (compliance data, old logs)
+
+S3 Glacier Flexible Retrieval:
+  Price: ~$0.0036/GB/month
+  Retrieval: 3-5 hours (standard), 12 hours (bulk, cheapest)
+  Min duration: 90 days
+  Use for: Yearly disaster recovery restores, compliance archives
+
+S3 Glacier Deep Archive:
+  Price: ~$0.00099/GB/month (cheapest storage on AWS)
+  Retrieval: 12 hours (standard), 48 hours (bulk)
+  Min duration: 180 days
+  Use for: 7-year compliance retention, data you'll probably never need
+\`\`\`
+
+**Decision guide:** If data is accessed multiple times/month → Standard. Unknown patterns → Intelligent-Tiering. Monthly access → Standard-IA. Quarterly → Glacier Instant. Yearly → Glacier Flexible. Compliance retention → Deep Archive.
 
 ---
 
@@ -1217,6 +2022,89 @@ aws s3api put-bucket-replication \
   }'
 \`\`\`
 
+---
+
+## Multipart Upload (Large Files)
+
+For files over 5GB, you MUST use multipart upload. AWS recommends it for anything over 100MB.
+
+\`\`\`bash
+# The AWS CLI does multipart automatically for large files
+aws s3 cp large-file.tar.gz s3://my-bucket/ \
+  --expected-size 10737418240  # 10GB in bytes
+
+# Control multipart threshold and part size
+aws s3 cp large-file.tar.gz s3://my-bucket/ \
+  --cli-binary-format raw-in-base64-out \
+  --sse aws:kms \
+  --storage-class INTELLIGENT_TIERING
+
+# Manual multipart (for fine-grained control):
+UPLOAD_ID=$(aws s3api create-multipart-upload \
+  --bucket my-bucket --key large-file.tar.gz \
+  --query 'UploadId' --output text)
+
+# Upload parts (each must be 5MB–5GB)
+aws s3api upload-part \
+  --bucket my-bucket --key large-file.tar.gz \
+  --upload-id $UPLOAD_ID --part-number 1 \
+  --body part1.bin
+
+# Complete the multipart upload
+aws s3api complete-multipart-upload \
+  --bucket my-bucket --key large-file.tar.gz \
+  --upload-id $UPLOAD_ID \
+  --multipart-upload '{"Parts":[{"PartNumber":1,"ETag":"..."}]}'
+
+# List and abort abandoned multipart uploads (they accumulate cost!)
+aws s3api list-multipart-uploads --bucket my-bucket
+aws s3api abort-multipart-upload --bucket my-bucket \
+  --key large-file.tar.gz --upload-id $UPLOAD_ID
+# Add a lifecycle rule to auto-abort incomplete multipart uploads after 7 days
+\`\`\`
+
+---
+
+## S3 Transfer Acceleration and S3 Select
+
+\`\`\`bash
+# S3 Transfer Acceleration: routes uploads/downloads through CloudFront edge locations
+# Speeds up uploads from distant locations (e.g., Europe → us-east-1: 2-3x faster)
+aws s3api put-bucket-accelerate-configuration \
+  --bucket my-bucket \
+  --accelerate-configuration Status=Enabled
+
+# Use accelerated endpoint:
+aws s3 cp large-file.tar.gz s3://my-bucket/ \
+  --endpoint-url https://my-bucket.s3-accelerate.amazonaws.com
+
+# S3 Select: run SQL queries on objects without downloading the whole file
+# Massive cost and performance win for large CSV/JSON/Parquet files
+aws s3api select-object-content \
+  --bucket my-bucket \
+  --key data/users.csv.gz \
+  --expression "SELECT * FROM S3Object WHERE age > 30 LIMIT 100" \
+  --expression-type SQL \
+  --input-serialization '{"CSV":{"FileHeaderInfo":"USE"},"CompressionType":"GZIP"}' \
+  --output-serialization '{"CSV":{}}' \
+  output.csv
+# Downloads only matching rows — saves 90%+ data transfer vs downloading the full file
+\`\`\`
+
+---
+
+## S3 Common Pitfalls
+
+**The minimum duration trap:** Standard-IA and Glacier have minimum storage durations (30 days and 90 days respectively). If you delete an object after 1 day, you're charged for the full minimum period. Lifecycle rules that transition too aggressively can increase costs rather than decrease them.
+
+**Multipart upload debt:** If a multipart upload is started but never completed or aborted (due to application crash), the parts stay in S3 and you're charged for them. Add a lifecycle rule to abort incomplete multipart uploads after 7 days as standard practice.
+
+**Not enabling versioning before enabling replication:** Cross-region replication requires versioning on the source bucket. Enable versioning first, then configure replication.
+
+**Object ownership with ACLs:** Since April 2023, S3 Object Ownership defaults to "Bucket owner enforced" — ACLs are disabled by default. If you have old code that uses \`--acl public-read\` or \`--acl bucket-owner-full-control\`, it will fail silently or throw an error. Modern S3 uses bucket policies instead of ACLs.
+
+**S3 eventual consistency myths:** Since December 2020, S3 provides strong read-after-write consistency for all operations. The old guidance about "eventual consistency for overwrite PUTs" is obsolete. You can safely read an object immediately after writing it.
+
 > **Tip:** Use **S3 Intelligent-Tiering** for data with unpredictable access patterns. It automatically moves objects between frequent and infrequent access tiers with no retrieval fees. For >90 days of storage, it almost always saves money over STANDARD.`,
           interviewQuestions: [
             {
@@ -1318,7 +2206,61 @@ aws organizations create-policy \\
           ],
           content: `## RDS & DynamoDB
 
-AWS offers both managed relational (RDS/Aurora) and managed NoSQL (DynamoDB) databases.
+AWS offers two managed database categories: relational (RDS/Aurora) for structured data with complex queries, and NoSQL (DynamoDB) for high-scale key-value and document access patterns. Choosing between them — and understanding their internals — is one of the most important decisions in cloud architecture.
+
+## RDS vs Aurora — Understanding the Difference
+
+**RDS** is managed MySQL, PostgreSQL, MariaDB, Oracle, or SQL Server on EC2 instances. AWS manages the OS and database engine patching. You provision the instance size and storage.
+
+**Aurora** is AWS's reimagining of MySQL/PostgreSQL built on a distributed storage system. The key innovation is separating compute from storage:
+
+\`\`\`
+Traditional RDS (e.g., PostgreSQL):
+  Writer instance ─────────────────────────────────── EBS volume
+  Read replica   ─── async replication lag ─────────── EBS volume
+                                              (separate, replicated independently)
+
+Aurora:
+  Writer instance ─── reads/writes ─────────────────┐
+  Read replica 1  ─── reads ──────────────────────── Aurora Distributed Storage
+  Read replica 2  ─── reads ──────────────────────── (6 copies across 3 AZs)
+                                                       ↑ Storage auto-scales 10GB–128TB
+\`\`\`
+
+**Aurora advantages:**
+- Storage automatically replicates across 6 nodes in 3 AZs (you can lose 2 without data loss)
+- Failover to a read replica takes ~30 seconds (vs 60-120s for Multi-AZ RDS)
+- Read replicas share the same underlying storage — zero replication lag for reads
+- Storage auto-grows in 10GB increments, you never provision storage
+- Aurora Serverless v2 scales compute in fine-grained 0.5 ACU increments (2GB RAM each)
+
+**When to use RDS vs Aurora:**
+- Aurora: new production workloads on MySQL or PostgreSQL (better HA, faster failover)
+- RDS: Oracle or SQL Server (Aurora doesn't support these); simple dev environments; cost sensitivity (Aurora ~20% more expensive than comparable RDS)
+
+## Multi-AZ vs Read Replicas — Different Purposes
+
+This is one of the most commonly confused concepts in AWS:
+
+\`\`\`
+Multi-AZ (High Availability):
+  Purpose: Automatic failover if primary fails
+  Replication: SYNCHRONOUS (primary waits for standby to confirm write)
+  Standby: NOT readable — it only exists for failover
+  Failover time: ~60-120 seconds (RDS), ~30 seconds (Aurora)
+  Cost: ~2x (you're paying for an instance that does no useful work)
+  When to use: Production databases that need HA
+
+Read Replicas (Horizontal Read Scaling):
+  Purpose: Offload read traffic from the primary
+  Replication: ASYNCHRONOUS (replication lag of milliseconds to seconds)
+  Replica: READABLE — your application can query it
+  Failover: Manual promotion (not automatic in RDS; automatic in Aurora)
+  Can be cross-region (useful for DR and geo-distributed reads)
+  When to use: When read traffic is overwhelming the primary
+\`\`\`
+
+Production databases should have BOTH: Multi-AZ for HA, plus read replicas for read scaling.
 
 ---
 
@@ -1395,7 +2337,69 @@ aws rds restore-db-cluster-to-point-in-time \
 
 ## DynamoDB
 
-DynamoDB is a fully managed key-value and document database with single-digit millisecond latency.
+DynamoDB is a fully managed key-value and document database with single-digit millisecond latency at any scale. Unlike RDS, there are no connection pools, no instance sizes to choose, and no schema migrations — but the data modeling philosophy is completely different from relational databases.
+
+## DynamoDB Internals — How It Achieves Scale
+
+DynamoDB distributes data across partitions based on the partition key:
+
+\`\`\`
+Table with partition key = customerId
+
+customerId="cust-001" → Partition A (stored on nodes 1,2,3 across 3 AZs)
+customerId="cust-002" → Partition B (stored on nodes 4,5,6 across 3 AZs)
+customerId="cust-003" → Partition A (hash collision, same partition)
+
+Each partition has: 1 leader node + 2 follower nodes
+Writes go to leader → synchronously replicated to 2 followers → success
+Reads can serve from any follower (read consistency options apply)
+\`\`\`
+
+**Why partition key design is critical:**
+- DynamoDB spreads partitions across servers to achieve horizontal scale
+- If your partition key has low cardinality (e.g., \`status: "pending"|"completed"\`), all "pending" orders land on the same few partitions — a "hot partition"
+- Hot partitions get throttled regardless of your table's total capacity
+- The solution: use high-cardinality partition keys (user IDs, UUIDs, order IDs)
+
+## DynamoDB Capacity Modes
+
+\`\`\`bash
+# Provisioned capacity (predictable workloads):
+# You specify read capacity units (RCUs) and write capacity units (WCUs)
+# 1 RCU = 1 strongly consistent read of ≤4KB per second
+#       = 2 eventually consistent reads of ≤4KB per second
+# 1 WCU = 1 write of ≤1KB per second
+# Reads > 4KB consume multiple RCUs; writes > 1KB consume multiple WCUs
+# Enable auto-scaling to adjust capacity based on utilization
+
+# On-demand capacity (unpredictable workloads):
+# PAY_PER_REQUEST: you don't provision anything
+# AWS scales to handle your actual traffic
+# ~6x more expensive per operation than optimally-provisioned capacity
+# Ideal for: new tables with unknown traffic, development, infrequent workloads
+\`\`\`
+
+## GSI vs LSI — When to Use Each
+
+\`\`\`
+Local Secondary Index (LSI):
+  - Created at table creation time ONLY (cannot add later)
+  - Same partition key as the table, different sort key
+  - Shares the table's provisioned capacity
+  - Allows strongly consistent reads
+  - Maximum 5 per table
+
+Global Secondary Index (GSI):
+  - Can be added at any time after table creation
+  - Different partition key and/or sort key from the table
+  - Has its own provisioned capacity (separate RCUs/WCUs)
+  - Only supports eventually consistent reads
+  - Maximum 20 per table (default limit)
+  - Use for access patterns that query by a non-primary-key attribute
+
+Decision: If you need a different sort key on the same partition, use LSI.
+          For any other secondary access pattern, use GSI.
+\`\`\`
 
 \`\`\`bash
 # Create a table
@@ -1457,6 +2461,49 @@ aws dynamodb update-item \
   --expression-attribute-names '{"#s": "status"}' \
   --expression-attribute-values '{":newStatus": {"S": "shipped"}}'
 \`\`\`
+
+---
+
+## DynamoDB Streams
+
+\`\`\`bash
+# Enable DynamoDB Streams (change data capture)
+aws dynamodb update-table \
+  --table-name orders \
+  --stream-specification StreamEnabled=true,StreamViewType=NEW_AND_OLD_IMAGES
+# StreamViewType options:
+#   KEYS_ONLY: only the key attributes
+#   NEW_IMAGE: item after modification
+#   OLD_IMAGE: item before modification
+#   NEW_AND_OLD_IMAGES: both (useful for auditing and change detection)
+
+# Connect Lambda to process the stream
+aws lambda create-event-source-mapping \
+  --function-name process-order-changes \
+  --event-source-arn arn:aws:dynamodb:us-east-1:123456789012:table/orders/stream/2024-01-01T00:00:00.000 \
+  --batch-size 100 \
+  --starting-position LATEST \
+  --bisect-batch-on-function-error  # split batch and retry halves on error
+
+# Use cases for Streams:
+# - Trigger notifications when order status changes
+# - Replicate changes to Elasticsearch for full-text search
+# - Maintain aggregate counters in a secondary table
+# - Audit log of all changes
+# - Cross-region replication (DynamoDB Global Tables uses streams internally)
+\`\`\`
+
+---
+
+## DynamoDB Common Pitfalls
+
+**Scanning in production:** A \`Scan\` operation reads every item in the table. For a table with 10 million items, this costs 10 million RCUs. It will also be slow and throttle other operations. If you need to query by an attribute that's not a key, add a GSI. Never use Scan in production critical paths.
+
+**Choosing status as partition key:** If 90% of your orders are \`status=pending\`, all writes hit the same partition and you'll be throttled. Use \`orderId\` or \`customerId\` as the partition key, and add a GSI on \`status\` if you need to query by it.
+
+**Under-provisioning WCUs for burst workloads:** DynamoDB has burst capacity (up to 5 minutes of unused capacity), but sustained writes over provisioned WCU will throttle. Enable DynamoDB auto-scaling with a target of 70% utilization to handle spikes.
+
+**Not enabling PITR (Point-in-Time Recovery):** DynamoDB PITR allows you to restore the table to any second within the last 35 days. It's inexpensive (~$0.20/GB/month) and should be enabled on every production table. A bug that deletes items has a recovery path with PITR; without it, you have nothing.
 
 > **Tip:** The most important DynamoDB design decision is choosing the right partition key. A poor partition key (like a date or boolean) creates "hot partitions" that throttle. Use high-cardinality keys (user ID, order ID) and add a random suffix if you need to spread writes across items with the same key.`,
           interviewQuestions: [
@@ -1539,7 +2586,66 @@ Query PK=USER#userId → all orders for user
           ],
           content: `## VPC Design & Security Groups
 
-A VPC (Virtual Private Cloud) is your private network in AWS. Good VPC design is the foundation of cloud security.
+A VPC (Virtual Private Cloud) is your isolated private network within AWS. Every EC2 instance, RDS database, Lambda in a VPC, ECS task, and EKS node lives inside a VPC. Good VPC design determines your security posture, network performance, and operational complexity.
+
+## How VPC Networking Works
+
+When you create a VPC, you're claiming a CIDR block from AWS's virtual network space. AWS's SDN (Software Defined Networking) handles all the routing — there's no physical network to configure.
+
+\`\`\`
+Key networking concepts:
+
+CIDR block (e.g., 10.0.0.0/16):
+  /16 = 65,536 IP addresses (10.0.0.0 to 10.0.255.255)
+  /24 = 256 IP addresses (10.0.1.0 to 10.0.1.255)
+  /28 = 16 IP addresses (minimum for a subnet; AWS reserves 5 of them)
+
+  AWS reserves 5 IPs per subnet:
+    10.0.1.0   = network address
+    10.0.1.1   = VPC router
+    10.0.1.2   = DNS resolver
+    10.0.1.3   = reserved for future use
+    10.0.1.255 = broadcast (not used in VPC but reserved)
+  So a /24 subnet = 251 usable IPs, not 256.
+
+Route tables:
+  Each subnet has a route table defining where traffic goes
+  0.0.0.0/0 → igw-xxx (public subnet — internet via Internet Gateway)
+  0.0.0.0/0 → nat-xxx (private subnet — internet via NAT Gateway)
+  No 0.0.0.0/0 route = no internet access (fully private)
+
+Internet Gateway (IGW):
+  Allows bidirectional internet traffic for instances with public IPs
+  One per VPC, no bandwidth limits, no charge for the gateway itself
+
+NAT Gateway:
+  Allows OUTBOUND-only internet traffic for private subnet instances
+  Deployed in a public subnet with an Elastic IP
+  Stateful — return traffic is allowed automatically
+  Cost: $0.045/hour + $0.045/GB data processed (can be expensive at scale)
+\`\`\`
+
+## CIDR Planning for Multi-Account Organizations
+
+Bad CIDR planning causes VPC peering conflicts and Transit Gateway routing issues. Plan before you deploy:
+
+\`\`\`
+Recommended allocation:
+  Production account:   10.0.0.0/16   (65K IPs across all environments)
+  Staging account:      10.1.0.0/16
+  Development account:  10.2.0.0/16
+  Shared services:      10.10.0.0/16  (VPN gateway, Active Directory, etc.)
+
+  Within each VPC (10.0.0.0/16):
+    Public subnets:       10.0.0.0/24, 10.0.1.0/24, 10.0.2.0/24  (one per AZ)
+    Private app subnets:  10.0.10.0/24, 10.0.11.0/24, 10.0.12.0/24
+    Private DB subnets:   10.0.20.0/24, 10.0.21.0/24, 10.0.22.0/24
+
+Why non-overlapping matters:
+  VPC peering requires non-overlapping CIDRs
+  Transit Gateway requires non-overlapping CIDRs
+  If you use 10.0.0.0/16 in all accounts, you can never peer them directly
+\`\`\`
 
 ---
 
@@ -1674,6 +2780,89 @@ aws logs start-query \
   --query-string 'fields @timestamp, srcAddr, dstAddr, dstPort, action | filter action = "REJECT" | sort @timestamp desc | limit 20'
 \`\`\`
 
+---
+
+## VPC Endpoints — Eliminate NAT Gateway Costs
+
+VPC endpoints allow your private subnet resources to reach AWS services (S3, DynamoDB, SSM, ECR, etc.) without traffic leaving the AWS network — and without using a NAT Gateway.
+
+\`\`\`bash
+# Gateway Endpoint for S3 (free — just updates route tables)
+aws ec2 create-vpc-endpoint \
+  --vpc-id $VPC_ID \
+  --service-name com.amazonaws.us-east-1.s3 \
+  --type Gateway \
+  --route-table-ids $PRI_RT
+# Now S3 traffic from private subnets routes directly, not through NAT Gateway
+# Typical savings: $500–$5000/month for high-S3-traffic workloads
+
+# Gateway Endpoint for DynamoDB (also free)
+aws ec2 create-vpc-endpoint \
+  --vpc-id $VPC_ID \
+  --service-name com.amazonaws.us-east-1.dynamodb \
+  --type Gateway \
+  --route-table-ids $PRI_RT
+
+# Interface Endpoints for other AWS services (costs ~$7/month per endpoint)
+# Needed for: SSM, Secrets Manager, ECR, CloudWatch, SQS, etc.
+aws ec2 create-vpc-endpoint \
+  --vpc-id $VPC_ID \
+  --service-name com.amazonaws.us-east-1.ssm \
+  --type Interface \
+  --subnet-ids $PRI_SN_1 $PRI_SN_2 \
+  --security-group-ids $APP_SG
+  --private-dns-enabled  # resolves ssm.us-east-1.amazonaws.com to private IP
+
+# List all available endpoint services in your region
+aws ec2 describe-vpc-endpoint-services \
+  --query 'ServiceNames[*]' --output text | tr '\t' '\n' | grep amazonaws
+\`\`\`
+
+**Which endpoints to prioritize:**
+1. **S3 and DynamoDB** (Gateway — free): Always create these, they have zero downside
+2. **ECR** (Interface): If you use ECS/EKS with private subnets, ECR endpoints eliminate NAT charges for image pulls (images can be GBs)
+3. **SSM** (Interface): Enables Session Manager on private instances without internet access
+4. **Secrets Manager** (Interface): Allows Lambda/ECS to fetch secrets without internet
+
+---
+
+## VPC Peering vs Transit Gateway
+
+\`\`\`
+VPC Peering:
+  Direct network connection between exactly 2 VPCs
+  Non-transitive: A↔B and B↔C does NOT mean A↔C
+  No bandwidth limit, minimal latency
+  Cost: $0.01/GB data transfer (within a region)
+  Use for: 2-3 VPCs, simple hub-and-spoke
+  Complexity: grows as O(n²) with VPC count (10 VPCs = 45 peering connections)
+
+Transit Gateway:
+  Central hub connecting many VPCs (and on-premises via VPN/Direct Connect)
+  Transitive: A→TGW→B→TGW→C works
+  Cost: $0.05/GB + $0.07/hour per attachment
+  Use for: 4+ VPCs, multi-account organizations, complex routing needs
+  Complexity: O(n) — just attach each VPC to the TGW
+
+AWS PrivateLink:
+  Expose a service endpoint from one VPC to another
+  Consumer connects via Interface Endpoint (private IP in their VPC)
+  Only the specific service is exposed, not the whole VPC
+  Use for: SaaS vendor integration, cross-account service sharing without full network access
+\`\`\`
+
+---
+
+## Common VPC Pitfalls
+
+**Default VPC:** Every AWS account has a default VPC with public subnets. It's convenient but insecure — instances launch with public IPs by default. Delete the default VPC in production accounts and use purpose-built VPCs with explicit public/private subnet design.
+
+**Single NAT Gateway:** Putting one NAT Gateway in one AZ is a single point of failure. If that AZ has issues, all private subnet instances in other AZs lose internet access. Use one NAT Gateway per AZ for HA (at $0.045/hour per gateway).
+
+**Security group sprawl:** Over time, teams add rules to security groups without removing old ones. A security group with 100 rules that nobody understands is a liability. Run regular audits and use descriptive names and descriptions.
+
+**NACL ephemeral port confusion:** NACLs are stateless. If you allow inbound HTTP (port 80), you must also explicitly allow outbound on ephemeral ports (1024-65535) for the response to reach the client. Forgetting this is a classic NACL debugging mistake.
+
 > **Tip:** Enable **VPC Endpoints** for services like S3 and DynamoDB. Traffic uses the AWS private network instead of going through the NAT Gateway, which saves both cost and latency. A single S3 VPC endpoint can eliminate thousands of dollars in NAT Gateway data processing charges per month.`,
           interviewQuestions: [
             {
@@ -1788,7 +2977,61 @@ Security groups handle this automatically — with NACLs, you must do it manuall
           ],
           content: `## ECR & ECS Fargate
 
-ECR (Elastic Container Registry) stores Docker images. ECS (Elastic Container Service) runs them without managing servers when using the Fargate launch type.
+ECR (Elastic Container Registry) is AWS's managed Docker registry — like Docker Hub but integrated with IAM, VPC, and the rest of AWS. ECS (Elastic Container Service) is AWS's container orchestrator, competing with Kubernetes but with far less operational complexity.
+
+## ECS Architecture — How It Works
+
+\`\`\`
+Your cluster is a logical grouping. Actual compute is either:
+
+Fargate launch type:
+  You describe CPU/memory requirements per task
+  AWS provisions invisible EC2 instances (you never see them)
+  Billed per task-second
+  No node management, no AMI updates, no capacity planning
+
+EC2 launch type:
+  You manage an Auto Scaling Group of EC2 instances
+  The ECS agent runs on each instance, accepting tasks from the control plane
+  You choose instance types, handle patching, manage scaling
+  More control, lower cost at scale, supports GPU and spot instances
+
+Key ECS concepts:
+  Task Definition: Blueprint for a container (image, CPU, memory, env vars, volumes)
+  Task: A running instance of a Task Definition (like a Kubernetes Pod)
+  Service: Maintains N running tasks, integrates with load balancers, handles rolling deploys
+  Cluster: Logical namespace containing services and tasks
+\`\`\`
+
+**ECS vs Kubernetes:** ECS is simpler but more opinionated. Kubernetes has a richer ecosystem (Helm, custom controllers, CRDs) but higher operational overhead. For most teams that don't need Kubernetes-specific features, ECS Fargate is the right choice for containers.
+
+## ECR — How Image Scanning Works
+
+When you enable scan-on-push in ECR, AWS uses Amazon Inspector (enhanced scanning) or Clair (basic scanning) to check for known CVEs in:
+- OS packages (apt, yum)
+- Language runtime packages (npm, pip, gem)
+
+\`\`\`bash
+# Check image vulnerabilities after push
+aws ecr describe-image-scan-findings \
+  --repository-name myapp \
+  --image-id imageTag=v1.0.0 \
+  --query 'imageScanFindings.findings[?severity==\`CRITICAL\`].{
+    Name:name,Severity:severity,Description:description
+  }' --output table
+
+# Fail CI/CD pipeline if CRITICAL vulnerabilities found
+CRITICAL_COUNT=$(aws ecr describe-image-scan-findings \
+  --repository-name myapp \
+  --image-id imageTag=v1.0.0 \
+  --query 'length(imageScanFindings.findings[?severity==\`CRITICAL\`])' \
+  --output text)
+
+if [ "$CRITICAL_COUNT" -gt "0" ]; then
+  echo "Found $CRITICAL_COUNT CRITICAL vulnerabilities. Blocking deployment."
+  exit 1
+fi
+\`\`\`
 
 ---
 
@@ -1950,6 +3193,97 @@ aws application-autoscaling put-scaling-policy \
   }'
 \`\`\`
 
+---
+
+## ECS Deployment Strategies
+
+\`\`\`bash
+# Rolling update (built-in, shown above):
+# ECS replaces tasks incrementally based on minimumHealthyPercent and maximumPercent
+# minimumHealthyPercent=50 means ECS can take down half the tasks at once
+# maximumPercent=200 means ECS can briefly double the task count during deploy
+
+# Blue/Green deployment with CodeDeploy (production standard):
+aws ecs update-service \
+  --cluster production \
+  --service myapp \
+  --deployment-controller '{"type": "CODE_DEPLOY"}'
+# CodeDeploy creates a new task set (green), shifts traffic gradually,
+# then deletes the old set (blue). Supports automatic rollback on alarms.
+
+# Check deployment status
+aws ecs describe-services \
+  --cluster production \
+  --services myapp \
+  --query 'services[0].deployments[*].{
+    ID:id,
+    Status:status,
+    Running:runningCount,
+    Desired:desiredCount,
+    PendingCount:pendingCount
+  }' --output table
+
+# Force new deployment (useful to pick up new secrets, updated images)
+aws ecs update-service \
+  --cluster production \
+  --service myapp \
+  --force-new-deployment
+\`\`\`
+
+---
+
+## ECS Service Connect (Modern Service Discovery)
+
+Service Connect, launched in 2022, simplifies inter-service communication within ECS clusters:
+
+\`\`\`bash
+# Task definition with Service Connect configuration
+aws ecs register-task-definition --cli-input-json '{
+  "family": "api-service",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "containerDefinitions": [{
+    "name": "api",
+    "image": "123456789012.dkr.ecr.us-east-1.amazonaws.com/api:latest",
+    "portMappings": [{
+      "containerPort": 3000,
+      "name": "api-port",        // named port for Service Connect
+      "appProtocol": "http"
+    }]
+  }]
+}'
+
+# Create service with Service Connect enabled
+aws ecs create-service \
+  --cluster production \
+  --service-name api \
+  --task-definition api-service:1 \
+  --service-connect-configuration '{
+    "enabled": true,
+    "namespace": "production",
+    "services": [{
+      "portName": "api-port",
+      "clientAliases": [{"port": 3000, "dnsName": "api"}]
+    }]
+  }'
+# Now other services in the cluster can reach this service at http://api:3000
+# No ALB needed for internal communication, built-in retries and metrics
+\`\`\`
+
+---
+
+## Common ECS/ECR Pitfalls
+
+**Not setting task role vs execution role correctly:** The execution role (\`ecsTaskExecutionRole\`) is for ECS infrastructure: pulling ECR images and writing CloudWatch logs. The task role is for your application code: accessing S3, DynamoDB, SQS, etc. Beginners often put application permissions on the execution role or forget the task role entirely.
+
+**Log driver not configured:** If you don't set up the \`awslogs\` log driver in your task definition, your container logs disappear into the void. Always configure CloudWatch logging — it's the only place you'll look when debugging a failing task.
+
+**ECR image pull failures in private subnets:** Fargate tasks in private subnets need either a NAT Gateway or VPC Interface Endpoints for ECR (\`ecr.api\`, \`ecr.dkr\`) and S3 (for image layers) to pull images. Many teams discover this the hard way after a deployment hangs for 10 minutes.
+
+**Health check misconfiguration:** ECS uses the task definition health check AND the ALB target group health check. If either fails, the task is marked unhealthy and ECS starts a rolling restart loop. Check both — a health check hitting an authenticated endpoint without credentials is a common trap.
+
 > **Tip:** Enable ECS **deployment circuit breaker** (shown above). It automatically rolls back a bad deployment if tasks fail to reach RUNNING state, saving you from manually rolling back at 3 AM.`,
           interviewQuestions: [
             {
@@ -2066,7 +3400,70 @@ aws servicediscovery create-service \\
           ],
           content: `## CloudFormation Infrastructure as Code
 
-CloudFormation provisions and manages AWS resources through declarative JSON/YAML templates.
+CloudFormation is AWS's native IaC service. You describe the desired state of your AWS resources in a JSON or YAML template, and CloudFormation figures out how to create, update, or delete resources to match that state. It handles dependency ordering, rollback on failure, and drift detection.
+
+## How CloudFormation Works Internally
+
+\`\`\`
+You submit a template → CloudFormation:
+
+1. Parses and validates the template (syntax, resource types, required properties)
+2. Builds a dependency graph from resource references (!Ref, !GetAtt, DependsOn)
+3. Determines which resources to create/update/delete (compared to existing stack)
+4. Creates a change set (plan) — what actions will be taken
+5. Executes changes in dependency order:
+   - Resources with no dependencies are created first (in parallel)
+   - Resources that depend on them are created after
+6. On failure: automatically rolls back all changes made in that update
+
+Key insight: CloudFormation is not sequential — it's a dependency graph executor.
+Resources that don't depend on each other are created in parallel.
+\`\`\`
+
+## CloudFormation vs Terraform — When to Use Each
+
+Both are mature IaC tools. The right choice depends on your context:
+
+\`\`\`
+CloudFormation:
+  ✅ Native AWS — free, no backend to manage, integrated with IAM/Organizations
+  ✅ StackSets for multi-account/region deployments (powerful for enterprise)
+  ✅ Drift detection built-in
+  ✅ Change sets = built-in plan/apply workflow
+  ❌ AWS only — can't manage GitHub, Datadog, PagerDuty alongside AWS resources
+  ❌ Verbose YAML/JSON — more lines than equivalent Terraform HCL
+  ❌ Stack state in AWS (can become corrupted; recovery is painful)
+
+Terraform:
+  ✅ Multi-cloud and multi-provider — AWS + GitHub + Cloudflare in one plan
+  ✅ More concise HCL syntax
+  ✅ Rich ecosystem of modules (terraform-aws-modules/*)
+  ✅ Explicit state file gives full control
+  ❌ State backend needs to be set up (S3 + DynamoDB for locking)
+  ❌ Paid features for enterprise (Sentinel, team management in Terraform Cloud)
+
+Recommendation:
+  AWS-only, enterprise organization → CloudFormation + StackSets
+  Multi-provider, startup/team → Terraform
+  Many teams use both: CloudFormation for account baseline (via StackSets),
+                       Terraform for application infrastructure
+\`\`\`
+
+## Stack vs StackSet — Organizational Scale
+
+\`\`\`
+Stack: Single CloudFormation deployment in one account + one region
+
+StackSet: Deploy the same template across multiple accounts and/or regions
+  from one management account — with drift detection and automatic deployment
+  to new accounts that join the organization
+
+Use StackSets for:
+  - Security baseline (CloudTrail, Config, GuardDuty enabled everywhere)
+  - Default VPC deletion (remove insecure default VPC from all accounts)
+  - IAM password policy enforcement
+  - Organization-wide S3 block public access settings
+\`\`\`
 
 ---
 
@@ -2230,6 +3627,79 @@ aws cloudformation list-stack-resources \
   --output table
 \`\`\`
 
+---
+
+## Custom Resources (Extending CloudFormation)
+
+CloudFormation doesn't support every AWS feature or third-party service. Custom Resources let you extend it with Lambda:
+
+\`\`\`yaml
+# Custom Resource backed by Lambda
+Resources:
+  GenerateSecretKey:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt SecretGeneratorFunction.Arn  # Lambda ARN
+      Length: 32
+      # Any properties here are passed to the Lambda as event.ResourceProperties
+
+  # Use the result in other resources
+  AppSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      SecretString: !GetAtt GenerateSecretKey.SecretKey  # return value from Lambda
+\`\`\`
+
+\`\`\`bash
+# Custom Resource Lambda must respond to CloudFormation with success/failure
+# Common use cases:
+# - Generate random values (passwords, API keys) at deploy time
+# - Register DNS records in external providers
+# - Trigger database migrations on stack update
+# - Wait for external systems to be ready before proceeding
+# - Clean up resources that CloudFormation doesn't know about
+\`\`\`
+
+---
+
+## Nested Stacks and Cross-Stack References
+
+\`\`\`yaml
+# Breaking large templates into nested stacks
+Resources:
+  VPCStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://s3.amazonaws.com/my-templates/vpc.yaml
+      Parameters:
+        Environment: !Ref Environment
+
+  DatabaseStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: VPCStack
+    Properties:
+      TemplateURL: https://s3.amazonaws.com/my-templates/rds.yaml
+      Parameters:
+        VpcId: !GetAtt VPCStack.Outputs.VpcId
+        SubnetIds: !GetAtt VPCStack.Outputs.PrivateSubnetIds
+\`\`\`
+
+**Nested stacks vs. cross-stack references:**
+- **Nested stacks**: parent-child relationship, parent manages lifecycle of children
+- **Cross-stack references** (\`!ImportValue\`): stacks are independent, outputs exported by name — use for shared infrastructure (VPCs, security groups) referenced by many application stacks
+
+---
+
+## Common CloudFormation Pitfalls
+
+**UPDATE_ROLLBACK_FAILED:** If a stack update fails AND the rollback fails, the stack is stuck in a terminal state. Common causes: the resource was deleted manually between the update and rollback, or an IAM permission that was present for the update was removed. Recovery requires manually fixing the resource state and then calling \`continue-update-rollback\`.
+
+**Replacement vs Update:** Some resource property changes require resource replacement (delete + recreate). CloudFormation will delete the old resource before creating the new one. For databases, this is catastrophic. Always check the change set for \`Replacement: True\` before executing. Set \`DeletionPolicy: Retain\` on critical resources.
+
+**Not enabling termination protection:** Any principal with \`cloudformation:DeleteStack\` can destroy your stack. Enable termination protection on production stacks. Add an SCP to deny \`cloudformation:DeleteStack\` for production accounts.
+
+**\`cfn-init\` vs user data:** \`cfn-init\` runs once and has a signal mechanism — the instance can tell CloudFormation when initialization is complete or failed. User data also runs once but CloudFormation doesn't know if it succeeded. For instances in a CloudFormation stack, use \`cfn-init\` + \`cfn-signal\` for proper lifecycle management.
+
 > **Tip:** Always use **change sets** in production — never \`update-stack\` directly. A change set is like \`terraform plan\`: review exactly what will be created, modified, or deleted before committing. The few seconds it takes saves hours of incident response.`,
           interviewQuestions: [
             {
@@ -2291,7 +3761,51 @@ aws cloudformation describe-stack-resource-drifts \\
           ],
           content: `## CodePipeline & CodeBuild
 
-AWS CodePipeline orchestrates CI/CD workflows. CodeBuild provides managed build environments.
+AWS CodePipeline orchestrates CI/CD workflows — it's the glue connecting your source code repository, build system, test environments, and deployment targets. CodeBuild provides managed, ephemeral build environments that scale automatically and cost nothing when idle (pay per build minute).
+
+## How CodePipeline Works
+
+\`\`\`
+Pipeline execution triggered by:
+  - Source code push (GitHub, CodeCommit, S3 object change)
+  - Manual trigger
+  - Scheduled trigger (EventBridge)
+
+Pipeline stages execute sequentially:
+  Source → [Build/Test → ...] → [Approval] → Deploy
+
+Artifacts (files passed between stages):
+  Each stage can produce output artifacts stored in S3
+  Next stages consume those artifacts as inputs
+  This S3 bucket is the "pipeline state" — don't delete it
+
+Action types per stage:
+  Source:   CodeCommit, GitHub, Bitbucket, S3
+  Build:    CodeBuild, Jenkins (custom action)
+  Test:     CodeBuild, Device Farm, custom
+  Deploy:   CodeDeploy, ECS, Elastic Beanstalk, S3, CloudFormation
+  Approval: Manual (human clicks Approve in Console/Slack/email)
+  Invoke:   Lambda (for custom actions)
+\`\`\`
+
+## CodeBuild Compute Types and When to Use Each
+
+\`\`\`
+BUILD_GENERAL1_SMALL:   3 GB RAM, 2 vCPU   → $0.005/min — unit tests, linting
+BUILD_GENERAL1_MEDIUM:  7 GB RAM, 4 vCPU   → $0.01/min  — Docker builds, integration tests
+BUILD_GENERAL1_LARGE:   15 GB RAM, 8 vCPU  → $0.02/min  — large builds, parallel test suites
+BUILD_GENERAL1_2XLARGE: 145 GB RAM, 72 vCPU → $0.20/min — very large builds, ML model builds
+
+ARM compute (Graviton — same price as Intel, often faster):
+BUILD_GENERAL1_SMALL (arm1):  4 GB RAM, 2 vCPU
+BUILD_GENERAL1_LARGE (arm1): 16 GB RAM, 8 vCPU
+
+GPU compute (for ML builds):
+BUILD_GENERAL1_SMALL (gpu1):  16 GB RAM, 4 vCPU, 1 NVIDIA T4 GPU
+
+Tip: Cache your build dependencies (node_modules, .m2, pip cache)
+     in S3 to cut build times by 50-80%.
+\`\`\`
 
 ---
 
@@ -2454,15 +3968,25 @@ aws codepipeline create-pipeline --cli-input-json file://pipeline.json
 # Trigger a pipeline manually
 aws codepipeline start-pipeline-execution --name myapp-pipeline
 
-# Get pipeline state
+# Get pipeline state (shows current stage and status)
 aws codepipeline get-pipeline-state --name myapp-pipeline \
   --query 'stageStates[*].{Stage:stageName,Status:latestExecution.status}'
 
-# List recent executions
+# List recent executions with status
 aws codepipeline list-pipeline-executions --pipeline-name myapp-pipeline \
-  --query 'pipelineExecutionSummaries[0:5].{ID:pipelineExecutionId,Status:status,Started:startTime}'
+  --query 'pipelineExecutionSummaries[0:5].{
+    ID:pipelineExecutionId,
+    Status:status,
+    Started:startTime,
+    Trigger:trigger.triggerType
+  }' --output table
 
-# Approve a manual gate
+# Get detailed execution information
+aws codepipeline get-pipeline-execution \
+  --pipeline-name myapp-pipeline \
+  --pipeline-execution-id <execution-id>
+
+# Approve a manual gate programmatically (useful for ChatOps bots)
 APPROVAL=$(aws codepipeline get-pipeline-state --name myapp-pipeline \
   --query 'stageStates[?stageName==\`Approval\`].actionStates[0].latestExecution.token' \
   --output text)
@@ -2472,8 +3996,83 @@ aws codepipeline put-approval-result \
   --stage-name Approval \
   --action-name ProductionApproval \
   --result '{"summary":"LGTM — staging verified","status":"Approved"}' \
-  --token \$APPROVAL
-\`\`\``,
+  --token $APPROVAL
+
+# Reject (with reason)
+aws codepipeline put-approval-result \
+  --pipeline-name myapp-pipeline \
+  --stage-name Approval \
+  --action-name ProductionApproval \
+  --result '{"summary":"P1 bug found in staging — do not deploy","status":"Rejected"}' \
+  --token $APPROVAL
+
+# Retry a failed stage
+aws codepipeline retry-stage-execution \
+  --pipeline-name myapp-pipeline \
+  --stage-name Build \
+  --pipeline-execution-id <execution-id> \
+  --retry-mode FAILED_ACTIONS
+\`\`\`
+
+---
+
+## CodeDeploy — Deployment Strategies
+
+\`\`\`bash
+# Create a CodeDeploy application for ECS
+aws deploy create-application \
+  --application-name myapp \
+  --compute-platform ECS
+
+# Create deployment group with canary strategy
+aws deploy create-deployment-group \
+  --application-name myapp \
+  --deployment-group-name production \
+  --deployment-config-name CodeDeployDefault.ECSCanary10Percent5Minutes \
+  # Shift 10% of traffic to new version, wait 5 minutes, then shift remaining 90%
+  # Options:
+  # ECSCanary10Percent5Minutes   — 10% canary, bake 5 min
+  # ECSCanary10Percent15Minutes  — 10% canary, bake 15 min
+  # ECSLinear10PercentEvery1Minute — 10% more every minute (10 min total)
+  # ECSAllAtOnce                 — immediate full cutover (blue/green, no canary)
+  --ecs-services '[{
+    "serviceName": "myapp",
+    "clusterName": "production"
+  }]' \
+  --load-balancer-info '{
+    "targetGroupPairInfoList": [{
+      "targetGroups": [
+        {"name": "myapp-tg-blue"},
+        {"name": "myapp-tg-green"}
+      ],
+      "prodTrafficRoute": {"listenerArns": ["arn:aws:elasticloadbalancing:..."]},
+      "testTrafficRoute": {"listenerArns": ["arn:aws:elasticloadbalancing:..."]}
+    }]
+  }' \
+  --auto-rollback-configuration '{
+    "enabled": true,
+    "events": ["DEPLOYMENT_FAILURE", "DEPLOYMENT_STOP_ON_ALARM"]
+  }' \
+  --alarm-configuration '{
+    "enabled": true,
+    "ignorePollAlarmFailure": false,
+    "alarms": [{"name": "api-high-5xx-errors"}]
+  }'
+  # If the api-high-5xx-errors alarm fires during the deployment,
+  # CodeDeploy automatically rolls back to the previous version
+\`\`\`
+
+---
+
+## Common CodePipeline/CodeBuild Pitfalls
+
+**Missing CAPABILITY_IAM in CloudFormation actions:** If your pipeline deploys a CloudFormation stack that creates IAM resources, you must add \`CAPABILITY_IAM\` (or \`CAPABILITY_NAMED_IAM\`) to the CloudFormation action configuration. Forgetting this causes the pipeline to fail with an unintuitive error.
+
+**Hardcoded image tags in ECS deployments:** If your task definition uses \`image: myapp:latest\`, ECS doesn't know a new image was pushed — \`:latest\` still points to the same cached image. Use the \`imagedefinitions.json\` artifact pattern (shown in the buildspec above) where CodeBuild generates the exact digest-tagged image URI, ensuring ECS pulls the new image.
+
+**CodeBuild without caching:** By default, CodeBuild installs dependencies from scratch on every build. For a Node.js app, \`npm install\` can take 2-3 minutes. Enable S3 caching for \`node_modules\` to reduce this to ~10 seconds.
+
+**Secrets in environment variables (PLAINTEXT type):** Never use PLAINTEXT type for secrets in CodeBuild — they appear in CloudTrail and build logs. Use \`PARAMETER_STORE\` or \`SECRETS_MANAGER\` type — the values are fetched at runtime and masked in logs.`,
         },
       ],
       exam: [
@@ -3270,7 +4869,56 @@ Fargate pods don't consume node IP capacity.`,
           ],
           content: `## CloudWatch Monitoring
 
-CloudWatch is the native AWS observability service — metrics, logs, alarms, and dashboards.
+CloudWatch is AWS's native observability platform. It handles metrics collection, log aggregation, alarm evaluation, dashboards, and automated actions — all in one service. Understanding its architecture helps you design effective monitoring strategies.
+
+## How CloudWatch Metrics Work
+
+\`\`\`
+Metric = a named data stream associated with a namespace and dimensions
+
+Namespace: AWS service or your application (e.g., AWS/EC2, MyApp/Orders)
+MetricName: What you're measuring (CPUUtilization, OrdersProcessed)
+Dimensions: Qualifiers that identify the source (InstanceId=i-xxx, Env=prod)
+
+Metric resolution:
+  Standard metrics: 1-minute minimum (5-minute default for basic monitoring)
+  High-resolution custom metrics: 1-second resolution (extra cost)
+  Most AWS service metrics (EC2, RDS, ALB): 1-minute resolution
+
+Storage:
+  Data points aggregated to 1-minute: stored for 15 days
+  Data points aggregated to 5-minute: stored for 63 days
+  Data points aggregated to 1-hour: stored for 455 days
+  You CANNOT get 1-minute data for events 16+ days ago
+
+Alarms:
+  Evaluate the metric every Period seconds
+  Enter ALARM state after EvaluationPeriods consecutive breaches
+  Actions: SNS notification, Auto Scaling policy, EC2 recovery, Systems Manager
+\`\`\`
+
+## CloudWatch Logs Insights Query Language
+
+Logs Insights is a powerful query engine for your CloudWatch log groups. It's far more capable than basic \`filter-log-events\`.
+
+\`\`\`
+Key commands:
+  fields @timestamp, @message  - display fields
+  filter @message like /ERROR/  - filter by regex or comparison
+  parse @message "* [*] *" as level, requestId, msg  - extract fields with pattern
+  stats count(*) by bin(5m)    - aggregate (count, avg, min, max, percentile)
+  sort @timestamp desc         - sort results
+  limit 100                    - limit output rows
+
+Percentile syntax: percentile(latency, 99) as p99
+
+Example: Find the most common error messages:
+  filter @message like /Exception/
+  | parse @message "* Exception: *" as ts, errorMsg
+  | stats count(*) as occurrences by errorMsg
+  | sort occurrences desc
+  | limit 20
+\`\`\`
 
 ---
 
@@ -3382,6 +5030,69 @@ done
 
 ---
 
+## Composite Alarms and Anomaly Detection
+
+\`\`\`bash
+# Composite alarm: alert only when BOTH error rate AND latency are high
+# (reduces false positives — high latency alone might be a blip)
+aws cloudwatch put-composite-alarm \
+  --alarm-name "api-degraded" \
+  --alarm-rule "ALARM(api-high-5xx) AND ALARM(api-high-latency)" \
+  --alarm-actions arn:aws:sns:us-east-1:123456789012:oncall-pagerduty \
+  --ok-actions arn:aws:sns:us-east-1:123456789012:oncall-pagerduty
+
+# Anomaly detection: alarm when metric deviates from its normal pattern
+# ML model learns the metric's baseline (time-of-day, day-of-week patterns)
+aws cloudwatch put-metric-alarm \
+  --alarm-name "api-anomalous-request-count" \
+  --metrics '[
+    {"Id":"m1","MetricStat":{"Metric":{"Namespace":"AWS/ApplicationELB",
+      "MetricName":"RequestCount","Dimensions":[{"Name":"LoadBalancer","Value":"app/my-alb/..."}]},
+      "Period":300,"Stat":"Sum"}},
+    {"Id":"t1","Expression":"ANOMALY_DETECTION_BAND(m1, 2)","Label":"Expected Band"}
+  ]' \
+  --comparison-operator GreaterThanUpperThreshold \
+  --threshold-metric-id t1 \
+  --evaluation-periods 2 \
+  --alarm-actions arn:aws:sns:us-east-1:123456789012:ops-alerts
+# This alarm fires when request count is more than 2 standard deviations above normal
+\`\`\`
+
+---
+
+## Container Insights and X-Ray Integration
+
+\`\`\`bash
+# Enable Container Insights on ECS cluster (adds CPU, memory, network per task)
+aws ecs update-cluster-settings \
+  --cluster production \
+  --settings name=containerInsights,value=enabled
+
+# Check Container Insights metrics
+aws cloudwatch get-metric-statistics \
+  --namespace ECS/ContainerInsights \
+  --metric-name MemoryUtilized \
+  --dimensions Name=ClusterName,Value=production Name=ServiceName,Value=myapp \
+  --statistics Average \
+  --period 300 \
+  --start-time $(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%S) \
+  --end-time $(date -u +%Y-%m-%dT%H:%M:%S)
+
+# Enable X-Ray tracing on Lambda (traces request flow across services)
+aws lambda update-function-configuration \
+  --function-name my-api-handler \
+  --tracing-config Mode=Active  # Active = sample every request (dev)
+                                 # PassThrough = honor incoming X-Ray header
+
+# Get X-Ray service map (shows latency between services)
+aws xray get-service-graph \
+  --start-time $(date -u -d '1 hour ago' +%s) \
+  --end-time $(date -u +%s) \
+  --query 'Services[*].{Name:Name,Type:Type,AvgLatency:SummaryStatistics.TotalResponseTime}'
+\`\`\`
+
+---
+
 ## CloudWatch Dashboard
 
 \`\`\`bash
@@ -3413,7 +5124,19 @@ aws cloudwatch put-dashboard \
       }
     ]
   }'
-\`\`\``,
+\`\`\`
+
+---
+
+## Common CloudWatch Pitfalls
+
+**Default monitoring vs. detailed monitoring on EC2:** By default, EC2 metrics are reported every 5 minutes (basic monitoring). Enable detailed monitoring for 1-minute resolution — it costs $3.50/instance/month but is essential for fast-responding Auto Scaling policies and catching short spikes.
+
+**The missing-data alarm trap:** When an EC2 instance is stopped or terminated, its metrics stop flowing. If your alarm treats missing data as \`INSUFFICIENT_DATA\` (the default), the alarm never enters ALARM state — and you never get notified that the instance is gone. Use \`--treat-missing-data breaching\` for health-check-style alarms.
+
+**Not setting OK actions:** Alarms that notify on ALARM but not on OK state leave your team uncertain about recovery. Always set \`--ok-actions\` to the same SNS topic so the team knows when the issue resolved.
+
+**Logs Insights query cost:** Every query scans the log data for the time range you specify. Scanning 100GB of logs repeatedly gets expensive. Use specific time ranges, filter early in your query, and consider moving infrequently queried logs to S3 + Athena.`,
         },
         {
           id: "security-and-cost",
@@ -3429,13 +5152,49 @@ aws cloudwatch put-dashboard \
           ],
           content: `## Security Services & Cost Management
 
-AWS provides native security services and cost management tools that integrate with your DevOps workflows.
+AWS provides a comprehensive set of native security services. Together, they form a layered defense: GuardDuty detects active threats, Security Hub aggregates findings, Config ensures compliance, CloudTrail audits every API call, and Organizations + SCPs prevent misconfigurations from ever happening.
+
+## The AWS Security Stack — Understanding What Each Service Does
+
+\`\`\`
+Prevention (stop bad things before they happen):
+  IAM + SCPs       → who can do what (authorization)
+  Security Groups  → what network traffic is allowed
+  S3 Block Public  → prevent accidental data exposure
+  AWS Config       → detect non-compliant configurations
+
+Detection (know when something bad is happening):
+  GuardDuty        → ML threat detection (anomalous API calls, crypto mining, etc.)
+  CloudTrail       → full audit log of every API call
+  VPC Flow Logs    → network traffic records
+  Security Hub     → aggregates findings from all security services
+
+Response (what to do when bad things happen):
+  EventBridge      → trigger Lambda/SNS on security findings
+  Systems Manager  → patch instances, run commands, access without SSH
+  AWS Config Rules → auto-remediate non-compliant resources
+
+Cost management:
+  Cost Explorer    → analyze past spending
+  Budgets          → alert on spending thresholds
+  Compute Optimizer → right-size recommendations
+  Savings Plans    → commit for discount on flexible compute
+\`\`\`
 
 ---
 
 ## GuardDuty — Threat Detection
 
-GuardDuty analyses CloudTrail, VPC Flow Logs, and DNS logs with ML to detect threats.
+GuardDuty analyses CloudTrail API logs, VPC Flow Logs, and DNS query logs using machine learning models and threat intelligence feeds. It runs continuously, 24/7, with no infrastructure to manage.
+
+**What GuardDuty can detect:**
+- EC2 instance calling known cryptocurrency mining pools
+- IAM credentials used from an unusual geographic location or TOR exit node
+- EC2 instance port scanning your own VPC (potential lateral movement)
+- Root account activity (should be zero in normal operations)
+- S3 bucket ACLs being changed to public
+- Lambda function making unusual outbound calls
+- API calls from known malicious IPs
 
 \`\`\`bash
 # Enable GuardDuty

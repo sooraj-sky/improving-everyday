@@ -30,69 +30,209 @@ export const linuxTrack: Track = {
           ],
           content: `# What is Linux?
 
-Linux is an open-source, Unix-like operating system kernel created by **Linus Torvalds** in 1991. It powers everything from smartphones (Android) to the world's top 500 supercomputers, cloud infrastructure, and embedded devices.
+Linux is an open-source, Unix-like operating system kernel created by **Linus Torvalds** in 1991. It powers everything from smartphones (Android) to the world's top 500 supercomputers, cloud infrastructure, and embedded devices. Understanding what Linux actually is — not just how to use it — is foundational to everything that follows in DevOps engineering.
 
-## The Linux Architecture
+## Why Linux Dominates Servers
+
+Linux won the server wars for several concrete reasons: it is free (no per-server licensing costs), its source code is auditable (security teams can verify behavior), it runs on everything from a Raspberry Pi to a 256-core NUMA server, and its performance tuning knobs go deep. When AWS, Google, and Microsoft run their own hypervisors and data centers, they all run Linux.
+
+- **98% of containers** run on Linux (Docker, containerd, and the OCI spec are Linux-native)
+- All major cloud providers (AWS, GCP, Azure) run Linux hypervisors underneath their VMs
+- CI/CD runners, Kubernetes nodes, and Docker hosts are almost always Linux
+- Bash scripting is the universal glue of infrastructure automation
+
+## The Kernel vs. Userspace Distinction
+
+This is the most important mental model in Linux. The operating system is divided into two worlds:
+
+**The Kernel** runs in a privileged CPU mode called "ring 0" (or kernel mode). It has direct access to hardware. It is responsible for:
+- **Process scheduling** — deciding which process gets CPU time next (the scheduler uses algorithms like CFS, the Completely Fair Scheduler)
+- **Memory management** — allocating RAM to processes, managing virtual memory, swapping pages to disk
+- **Device drivers** — translating abstract file operations into hardware-specific commands (write to /dev/sda triggers the SATA driver)
+- **System calls** — the bridge between userspace and kernel; every \`read()\`, \`write()\`, \`fork()\`, \`socket()\` call crosses this boundary
+- **Network stack** — TCP/IP implementation lives in the kernel (layers 2–4)
+- **Filesystem layer** — VFS (Virtual Filesystem Switch) abstracts ext4, xfs, btrfs behind a unified interface
+
+**Userspace** runs in unprivileged CPU mode (ring 3). Every application, shell, and library lives here. When a userspace program needs kernel services, it makes a **system call** — a controlled entry point into the kernel. The C library (glibc) wraps these raw syscalls into friendly functions: \`printf()\` eventually calls \`write(syscall)\`.
 
 \`\`\`
-┌─────────────────────────────────┐
-│         User Applications        │
-├─────────────────────────────────┤
-│     Shell (bash, zsh, fish)      │
-├─────────────────────────────────┤
-│        System Libraries          │
-│         (glibc, musl)            │
-├─────────────────────────────────┤
-│        Linux Kernel              │
-│  Process │ Memory │ File System  │
-│  Network │ Device Drivers        │
-├─────────────────────────────────┤
-│           Hardware               │
-└─────────────────────────────────┘
+┌─────────────────────────────────────────────────┐
+│              User Applications                   │  ← ring 3 (unprivileged)
+│  (nginx, postgres, your Python script, etc.)    │
+├─────────────────────────────────────────────────┤
+│         Shell (bash, zsh, fish)                  │
+├─────────────────────────────────────────────────┤
+│      System Libraries (glibc, musl)              │
+│  open() → wraps → openat(2) syscall              │
+├─────────────────────────────────────────────────┤
+│═══════════ SYSTEM CALL INTERFACE ═══════════════│  ← kernel boundary
+├─────────────────────────────────────────────────┤
+│               Linux Kernel                       │  ← ring 0 (privileged)
+│  Scheduler │ Memory Mgr │ VFS │ Network Stack   │
+│  Device Drivers │ IPC │ Security (SELinux/AppArmor)│
+├─────────────────────────────────────────────────┤
+│                  Hardware                        │
+│  CPU │ RAM │ NIC │ Disk │ USB │ GPU              │
+└─────────────────────────────────────────────────┘
 \`\`\`
 
-The **kernel** manages hardware resources. The **shell** is your interface to the kernel. Everything else is user space.
+Why does this distinction matter for DevOps? Because when your app is slow, you need to know whether the bottleneck is in your application code (userspace) or in kernel operations like disk I/O, network, or memory pressure. Tools like \`strace\` (which traces system calls) and \`perf\` (kernel-level profiling) operate at this boundary.
 
-## Major Distributions
+## Distributions: Why They Differ
 
-| Distribution | Base | Use Case |
-|-------------|------|----------|
-| Ubuntu 24.04 LTS | Debian | General purpose, cloud, desktop |
-| Debian 12 | Independent | Servers, stability-focused |
-| RHEL / Rocky Linux | RPM | Enterprise, regulated industries |
-| Alpine Linux | Independent | Containers (tiny: ~5MB) |
-| Arch Linux | Independent | Advanced users, bleeding edge |
-| Amazon Linux 2023 | RHEL-based | AWS EC2 workloads |
+Linux the kernel is just one component. A **distribution** (distro) bundles the kernel with a package manager, init system, toolchain, and default configuration choices. The differences that matter to DevOps engineers:
 
-## Linux in DevOps
+| Distribution | Base | Package Manager | Init System | Default Shell | Use Case |
+|---|---|---|---|---|---|
+| Ubuntu 24.04 LTS | Debian | apt / dpkg | systemd | bash | General purpose, cloud, desktop |
+| Debian 12 | Independent | apt / dpkg | systemd | bash | Servers, stability-focused |
+| RHEL / Rocky Linux | RPM | dnf / rpm | systemd | bash | Enterprise, regulated industries |
+| Alpine Linux | Independent | apk | OpenRC | ash | Containers (tiny: ~5MB) |
+| Amazon Linux 2023 | RHEL-based | dnf | systemd | bash | AWS EC2 workloads |
+| Arch Linux | Independent | pacman | systemd | bash | Advanced users, bleeding edge |
 
-- **98% of containers** run on Linux
-- All major cloud providers run Linux hypervisors
-- CI/CD runners, Kubernetes nodes, and Docker hosts are Linux
-- Bash scripting is the glue of automation
+**Package managers** differ fundamentally: Debian-based systems use \`.deb\` packages and \`apt\`; Red Hat-based systems use \`.rpm\` packages and \`dnf\`/\`yum\`. This affects how you install software, manage dependencies, and automate configuration with tools like Ansible.
 
-## Key Concepts
+**Kernel versions** differ: Ubuntu LTS ships a patched "HWE" (Hardware Enablement) kernel; Alpine ships a hardened kernel; Amazon Linux ships AWS-optimized kernels with custom drivers. These differences affect available syscalls, eBPF support, and performance characteristics.
 
-**Everything is a file** — devices (/dev/sda), processes (/proc/1234), sockets, pipes — all represented as files.
+## The Linux Boot Process
 
-**Processes** — every running program is a process with a PID. The first process is **systemd** (PID 1).
+Understanding boot is crucial for debugging startup failures and configuring services. The sequence from power-on to your application running:
 
-**Users and permissions** — multi-user system with fine-grained permission model (owner/group/other).
+\`\`\`
+1. Power On
+   │
+2. BIOS / UEFI
+   │  Hardware POST (Power-On Self Test)
+   │  Finds the bootable disk
+   │
+3. Bootloader (GRUB2)
+   │  Lives in the MBR or EFI partition
+   │  Presents boot menu (if configured)
+   │  Loads the kernel image + initramfs into RAM
+   │
+4. Kernel Initialization
+   │  Decompresses itself
+   │  Initializes memory management, scheduler, subsystems
+   │  Mounts the initramfs (temporary root filesystem in RAM)
+   │
+5. initramfs
+   │  Minimal environment containing drivers + tools
+   │  Loads drivers needed to mount the real root filesystem
+   │  (especially important for encrypted disks, LVM, RAID)
+   │
+6. systemd (PID 1)
+   │  The init system: parent of all processes
+   │  Reads unit files, builds dependency graph
+   │  Mounts real filesystems (/etc/fstab)
+   │  Starts services in parallel
+   │
+7. Your Application Service
+   └─ systemd starts nginx / postgresql / your app
+\`\`\`
 
-> **Tip:** Use \`uname -a\` to see your kernel version, and \`lsb_release -a\` or \`cat /etc/os-release\` to identify the distribution.
+When a server won't boot, you work backward through this chain. A kernel panic at step 4 is different from a failing service at step 7.
+
+## The Filesystem Hierarchy Standard (FHS)
+
+Linux organizes files in a standardized layout. Understanding where things live saves hours of searching:
+
+\`\`\`
+/                   root of the entire filesystem
+├── /bin            essential user binaries (ls, cp, mv) — symlink to /usr/bin on modern systems
+├── /boot           kernel and bootloader files (vmlinuz, initrd, grub/)
+├── /dev            device files (character/block devices created by kernel)
+│   ├── /dev/sda    first SATA/SCSI disk
+│   ├── /dev/null   data sink (write anything, reads return EOF)
+│   ├── /dev/zero   source of null bytes
+│   └── /dev/random cryptographically secure random bytes
+├── /etc            system configuration files (NEVER put data here)
+│   ├── /etc/passwd user account database
+│   ├── /etc/fstab  filesystem mount table
+│   └── /etc/systemd/  systemd unit files
+├── /home           user home directories (/home/alice, /home/bob)
+├── /lib            shared libraries for /bin and /sbin
+├── /opt            optional third-party software (/opt/myapp, /opt/google)
+├── /proc           virtual filesystem: kernel exposes process/system info here
+│   ├── /proc/1234/ everything about process PID 1234
+│   ├── /proc/meminfo memory statistics
+│   └── /proc/cpuinfo CPU information
+├── /root           home directory for the root user (NOT the same as /)
+├── /run            runtime data (PID files, sockets) — cleared on boot
+├── /sys            virtual filesystem: kernel exposes hardware/driver info here
+│   ├── /sys/block/ block device attributes
+│   └── /sys/class/net/  network interface attributes
+├── /tmp            temporary files — world-writable, cleared on boot (or periodically)
+├── /usr            read-only user data (most programs live here)
+│   ├── /usr/bin    user commands (python3, git, vim)
+│   ├── /usr/lib    libraries
+│   └── /usr/local  locally installed software (compiled from source, not package manager)
+└── /var            variable data that grows (logs, databases, spool)
+    ├── /var/log    log files
+    ├── /var/lib    application state (databases live here: /var/lib/mysql)
+    └── /var/run    → symlink to /run on modern systems
+\`\`\`
+
+The crucial distinction: **/proc and /sys are not real files**. The kernel generates their contents dynamically when you read them. Reading \`/proc/meminfo\` queries the kernel's memory allocator in real time. Writing to \`/proc/sys/net/ipv4/ip_forward\` modifies a running kernel parameter instantly.
+
+## How It Works Internally
+
+When you run a command like \`cat /proc/meminfo\`, here is what actually happens at the kernel level:
+
+1. The shell calls \`fork()\` — creates a copy of itself
+2. The child calls \`execve("/usr/bin/cat", ["cat", "/proc/meminfo"])\` — replaces itself with the cat program
+3. cat calls \`open("/proc/meminfo", O_RDONLY)\` — a system call that crosses into kernel space
+4. The kernel's VFS layer recognizes the path is under /proc and dispatches to the procfs driver
+5. The procfs driver calls the \`meminfo_proc_show()\` kernel function which queries the memory subsystem
+6. The data is written into a kernel buffer, then copied back to userspace
+7. cat calls \`write(STDOUT, buffer, len)\` — another syscall — to write to your terminal
+
+Every single file operation in Linux follows this syscall path. This is why \`strace\` is so powerful — it shows you every one of these crossings.
+
+## Common Mistakes
+
+**Confusing / (root) with /root**: The root of the filesystem is \`/\`. The home directory of the root user is \`/root\`. These are completely different locations.
+
+**Editing files in /proc or /sys with a text editor**: These virtual files are not regular files. Use \`sysctl\` or \`echo\` with \`tee\` to write to them.
+
+**Assuming package names are the same across distros**: \`httpd\` on RHEL is \`apache2\` on Debian. Always check before assuming.
+
+## Production Usage
 
 \`\`\`bash
+# Identify your Linux version (important before installing packages)
 uname -a
-# Linux myserver 6.5.0-1022-aws #22-Ubuntu SMP x86_64 GNU/Linux
+# Linux myserver 6.5.0-1022-aws #22~22.04.1-Ubuntu SMP x86_64 GNU/Linux
+#        ↑hostname ↑kernel version          ↑arch
 
 cat /etc/os-release
 # NAME="Ubuntu"
-# VERSION="24.04 LTS (Noble Numbat)"
+# VERSION_ID="24.04"
+# PRETTY_NAME="Ubuntu 24.04 LTS"
 
 hostnamectl
-# Static hostname: myserver
 # Operating System: Ubuntu 24.04 LTS
 # Kernel: Linux 6.5.0-1022-aws
+# Architecture: x86-64
+
+# Check uptime and load (was the server just rebooted?)
+uptime
+# 14:32:05 up 45 days, 3:22, 2 users, load average: 0.15, 0.12, 0.10
+
+# Check memory and swap
+free -h
+# total    used    free    shared  buff/cache  available
+# Mem:     15G     4.2G    8.1G    234M        3.1G        11G
+# Swap:    2.0G    0B      2.0G    ← swap unused = good
+
+# Check running kernel modules (drivers loaded)
+lsmod | head -20
+
+# Check disk and filesystem info
+df -hT    # -T shows filesystem type (ext4, xfs, tmpfs)
+
+# Quick system health overview — first thing to run on a new server
+uname -r && cat /etc/os-release | grep PRETTY_NAME && uptime && free -h && df -h
 \`\`\`
 `,
         },
@@ -110,106 +250,300 @@ hostnamectl
           ],
           content: `# Shell Basics & Navigation
 
-The shell is your command-line interface to Linux. **Bash** (Bourne Again Shell) is the default on most systems.
+The shell is your command-line interface to Linux. **Bash** (Bourne Again Shell) is the default on most systems. It's not just an interactive tool — it is a full programming language and the primary scripting environment for DevOps automation.
+
+## How the Shell Processes a Command
+
+Before you can use the shell effectively, understanding what happens when you press Enter is essential. The shell does not simply pass your text to the kernel — it performs several transformation steps:
+
+\`\`\`
+You type: ls -la /etc/*.conf | grep ssh
+           │
+           ▼
+1. TOKENIZATION: split on whitespace
+   ["ls", "-la", "/etc/*.conf", "|", "grep", "ssh"]
+           │
+           ▼
+2. VARIABLE EXPANSION: $HOME, $PATH, $1, etc.
+   ls -la /etc/*.conf | grep ssh   (no variables here)
+           │
+           ▼
+3. GLOB EXPANSION: *.conf → list of matching files
+   ls -la /etc/ssh/ssh_config /etc/apt/apt.conf ... | grep ssh
+           │
+           ▼
+4. PIPE SETUP: kernel creates a pipe (two file descriptors)
+   stdout of ls → stdin of grep
+           │
+           ▼
+5. FORK + EXEC for each command:
+   - shell forks itself
+   - child process calls exec("ls", ["-la", "/etc/ssh/ssh_config", ...])
+   - simultaneously: another fork → exec("grep", ["ssh"])
+\`\`\`
+
+This sequence has practical consequences. Globbing happens **before** the command runs — if \`/etc/*.conf\` matches 100 files, \`ls\` receives 100 arguments, not the pattern \`*.conf\`. This is why \`rm *.txt\` is different from \`rm "*.txt"\` (the quoted version passes a literal asterisk).
+
+## stdin, stdout, and stderr — File Descriptors
+
+Every process starts with three open file descriptors:
+
+| FD | Name | Default destination |
+|---|---|---|
+| 0 | stdin | keyboard (terminal input) |
+| 1 | stdout | terminal (normal output) |
+| 2 | stderr | terminal (error messages) |
+
+These are just integers. When you redirect \`>\`, you are telling the kernel to point file descriptor 1 at a file instead of the terminal. This is why \`2>&1\` (redirect stderr to where stdout currently points) must come AFTER \`>file.txt\` — order matters.
+
+\`\`\`bash
+# stdout only to file (stderr still shows in terminal)
+ls /etc > /tmp/list.txt
+
+# Both stdout and stderr to file
+ls /nonexistent /etc > /tmp/out.txt 2>&1
+
+# Shorthand for both
+ls /nonexistent /etc &> /tmp/out.txt
+
+# Discard errors (2>/dev/null is the most common redirection in scripts)
+find / -name "*.conf" 2>/dev/null
+
+# Pipe only stdout (stderr stays on terminal)
+ls /etc /nonexistent | wc -l
+
+# Pipe both stdout and stderr
+ls /etc /nonexistent 2>&1 | wc -l
+
+# Send stderr to stdout's destination (in pipelines)
+command 2>&1 | tee output.log
+\`\`\`
+
+## The PATH Variable and Command Resolution
+
+When you type \`python3\`, the shell does not search every directory on the system. It searches only the directories listed in the \`PATH\` environment variable, in order, stopping at the first match.
+
+\`\`\`bash
+echo $PATH
+# /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# The shell checks each directory for an executable named "python3":
+# 1. /usr/local/sbin/python3  → not found
+# 2. /usr/local/bin/python3   → FOUND → execute this
+
+# See which python3 is used
+which python3
+# /usr/bin/python3
+
+# See ALL matching executables in PATH (not just the first)
+type -a python3
+# python3 is /usr/bin/python3
+# python3 is /usr/local/bin/python3
+
+# Add a directory to PATH (put in ~/.bashrc for persistence)
+export PATH="$HOME/.local/bin:$PATH"
+# Prepend (put at start) so your version overrides system version
+\`\`\`
+
+**Why this matters in production:** A script that works for you interactively might fail in cron or CI/CD because those environments have a minimal PATH. Always use absolute paths (\`/usr/bin/python3\`) in scripts, or explicitly set PATH at the top.
+
+## Shell Built-ins vs. External Commands
+
+Some commands are built into the shell itself; others are separate executables. This distinction matters for performance and behavior.
+
+\`\`\`bash
+# Check if a command is a built-in
+type cd       # cd is a shell builtin
+type ls       # ls is /usr/bin/ls (external)
+type echo     # echo is a shell builtin (AND an external command)
+type alias    # alias is a shell builtin
+
+# Why cd MUST be a built-in:
+# - cd needs to change the current process's working directory
+# - If cd were an external command, it would run in a child process
+# - The child process would change its own directory, then exit
+# - The parent shell's directory would be unchanged
+# - This is a fundamental UNIX property: a child process cannot change
+#   its parent's state (working directory, environment variables, etc.)
+\`\`\`
+
+Built-ins: \`cd\`, \`echo\`, \`export\`, \`alias\`, \`source\` (or \`.\`), \`read\`, \`set\`, \`unset\`, \`exit\`, \`exec\`, \`printf\`, \`test\` (or \`[\`), \`type\`, \`help\`
 
 ## The Prompt
 
 \`\`\`bash
-sooraj@server:~\$         # regular user
-root@server:/etc#        # root user (# = root)
-# user@hostname:cwd prompt/symbol
+sooraj@server:~\$         # regular user: username@hostname:cwd$
+root@server:/etc#        # root user: # symbol (ring the alarm — you are root)
 \`\`\`
+
+The \`#\` vs \`$\` convention is not cosmetic. Root can destroy a system with a typo. Many engineers configure their terminal to show red for the root prompt as a visual warning.
 
 ## Navigation
 
 \`\`\`bash
-pwd                      # print working directory
-ls                       # list files
-ls -la                   # long format + hidden files
-ls -lh                   # human-readable sizes
-ls -lt                   # sort by modification time
+pwd                      # print working directory — absolute path of where you are
+ls                       # list directory contents
+ls -l                    # long format: permissions, owner, size, date, name
+ls -la                   # long format + hidden files (. prefix files)
+ls -lh                   # human-readable sizes (K, M, G instead of bytes)
+ls -lt                   # sort by modification time (newest first)
+ls -ltr                  # reverse time sort (oldest first — useful for logs)
+ls -lS                   # sort by size (largest first)
 
-cd /var/log              # absolute path
-cd ..                    # parent directory
-cd ~                     # home directory
-cd -                     # previous directory
+cd /var/log              # absolute path — starts from /
+cd ../nginx              # relative path — .. = parent directory
+cd ~                     # home directory (same as cd $HOME)
+cd -                     # previous directory (toggle between two directories)
+cd                       # no argument = go home (same as cd ~)
 \`\`\`
 
 ## Working with Files and Directories
 
 \`\`\`bash
-# Create
+# Create directories
 mkdir mydir
-mkdir -p a/b/c           # create nested dirs
+mkdir -p a/b/c           # -p: create parent directories as needed (no error if exists)
+mkdir -m 755 /opt/myapp  # -m: set permissions at creation time
 
-touch file.txt           # create empty file
-echo "hello" > file.txt  # create with content
-echo "more" >> file.txt  # append
+# Create files
+touch file.txt           # create empty file, or update timestamps if it exists
+echo "hello" > file.txt  # create/overwrite with content (> truncates first)
+echo "more" >> file.txt  # append content (>> does NOT truncate)
 
-# Copy & Move
-cp file.txt backup.txt
-cp -r mydir/ mydir-copy/ # recursive copy
-mv file.txt newname.txt  # rename
-mv file.txt /tmp/        # move to /tmp
+# Copy files
+cp file.txt backup.txt                    # copy file
+cp -r mydir/ mydir-copy/                  # -r: recursive (required for directories)
+cp -a /src/ /dst/                         # -a: archive mode (preserves permissions, timestamps, symlinks)
+cp -p file.txt backup.txt                 # -p: preserve permissions and timestamps
+cp -i file.txt backup.txt                 # -i: interactive, prompt before overwrite
+
+# Move / rename (mv is atomic on the same filesystem — a rename syscall)
+mv file.txt newname.txt  # rename a file
+mv file.txt /tmp/        # move to a directory
+mv dir1/ dir2/           # rename or move a directory
 
 # Delete
-rm file.txt
-rm -r mydir/             # recursive (careful!)
-rm -rf mydir/            # force (no prompt — dangerous)
-rmdir emptydir           # only works if empty
+rm file.txt              # delete file
+rm -r mydir/             # -r: recursive (required for non-empty directories)
+rm -rf mydir/            # -f: force (no prompts, no errors for missing files)
+rm -i *.txt              # -i: interactive prompt for each file (safer)
+rmdir emptydir           # remove directory only if empty (safer than rm -r)
+
+# Hard and symbolic links
+ln target linkname       # hard link (same inode, another name)
+ln -s target linkname    # -s: symbolic link (a pointer, can cross filesystems)
 \`\`\`
+
+**The difference between \`cp -r\` and \`cp -a\`**: \`-a\` (archive) preserves file permissions, ownership, timestamps, and copies symlinks as symlinks rather than following them. Always use \`-a\` when cloning a directory tree for backup or deployment purposes.
 
 ## Viewing File Contents
 
 \`\`\`bash
-cat /etc/hostname         # print entire file
-less /var/log/syslog      # pager (q to quit, / to search)
-head -20 /var/log/auth.log   # first 20 lines
-tail -20 /var/log/auth.log   # last 20 lines
-tail -f /var/log/syslog      # follow in real-time (Ctrl+C to stop)
-wc -l file.txt               # count lines
+cat file.txt             # print entire file to stdout (concatenate)
+cat -n file.txt          # -n: show line numbers
+cat -A file.txt          # -A: show special chars (^ = Ctrl, $ = end of line — reveals Windows CRLF)
+
+less /var/log/syslog     # interactive pager: navigate large files
+                         # q=quit, /pattern=search, n=next match, G=end, g=start
+
+head -20 file.txt        # first 20 lines (default 10)
+head -c 1024 file.txt    # first 1024 bytes
+
+tail -20 file.txt        # last 20 lines (default 10)
+tail -f /var/log/syslog  # -f: follow (stream new lines in real time)
+tail -F /var/log/app.log # -F: follow filename (handles log rotation — reopens if file disappears)
+tail -n +5 file.txt      # all lines STARTING FROM line 5
+
+wc -l file.txt           # count lines
+wc -w file.txt           # count words
+wc -c file.txt           # count bytes
 \`\`\`
+
+**Why \`tail -F\` over \`tail -f\`**: Log rotation renames and recreates the log file. \`tail -f\` follows the inode (the old file), so you stop seeing new logs after rotation. \`tail -F\` follows the filename and reopens when the file is recreated — essential for watching production logs.
 
 ## Finding Things
 
 \`\`\`bash
-find /etc -name "*.conf"           # find by name
-find /var/log -mtime -1            # modified in last 24h
-find / -size +100M 2>/dev/null     # files > 100MB
-find /home -user sooraj            # owned by user
+# find: search the filesystem tree
+find /etc -name "*.conf"              # search by filename pattern
+find /etc -name "nginx.conf"          # exact filename
+find /var/log -mtime -1               # modified in the last 24 hours
+find / -size +100M 2>/dev/null        # files over 100MB (2>/dev/null suppresses permission errors)
+find /home -user sooraj               # owned by a specific user
+find /tmp -type f -empty              # empty regular files
 
-which python3                       # path of executable
-type ls                             # is it alias/builtin/file?
-locate nginx.conf                   # fast (uses database: updatedb)
+# which: find the first match in PATH
+which python3              # /usr/bin/python3
+
+# type: more detailed than which (shows aliases, builtins)
+type ls                    # ls is aliased to 'ls --color=auto'
+type cd                    # cd is a shell builtin
+
+# locate: faster, but uses a stale database (not real-time)
+locate nginx.conf          # very fast (searches pre-built database)
+updatedb                   # update the locate database (usually run daily by cron)
 \`\`\`
+
+## How It Works Internally: fork() + exec()
+
+When you run any external command, the shell performs this exact sequence:
+
+1. \`fork()\`: The shell calls this syscall to create an identical child process. Both parent and child continue from the same point in code, but with different return values from fork().
+2. In the child: \`exec()\`: Replaces the child's memory with the new program. The child process is now \`ls\` (or whatever command you ran).
+3. In the parent (shell): \`wait()\`: The shell blocks waiting for the child to finish, then collects its exit code.
+
+This is why running \`source script.sh\` (or \`. script.sh\`) is different from \`./script.sh\`. The dot command runs the script in the **current shell process** without forking — so variable assignments and \`cd\` commands in the script affect your current session. \`./script.sh\` runs in a child process, so changes are isolated.
 
 ## Productivity Tips
 
 \`\`\`bash
-# Tab completion — press Tab to autocomplete paths and commands
+# Tab completion — the shell searches PATH and filesystem
 ls /var/lo[TAB]    →  ls /var/log/
+ssh us[TAB]        →  ssh user@...  (if in known_hosts)
 
 # Command history
-history            # show all commands
-!!                 # repeat last command
-!ssh               # repeat last ssh command
-Ctrl+R             # reverse search history
+history            # show numbered command history (~500 recent commands)
+!!                 # re-run the exact last command (useful with sudo: sudo !!)
+!ssh               # re-run the last command that started with "ssh"
+!500               # re-run command number 500 from history
+Ctrl+R             # reverse incremental search — type to find matching command
+Ctrl+G             # cancel Ctrl+R search
 
-# Aliases (add to ~/.bashrc)
+# Aliases (add to ~/.bashrc for persistence across sessions)
 alias ll='ls -la'
 alias ..='cd ..'
 alias grep='grep --color=auto'
+alias k='kubectl'
+alias tf='terraform'
 
-# Useful shortcuts
-Ctrl+C   # kill current process
-Ctrl+Z   # suspend process (fg to resume)
-Ctrl+D   # exit shell / EOF
-Ctrl+L   # clear screen (same as 'clear')
-Ctrl+A   # move to start of line
-Ctrl+E   # move to end of line
+# Essential keyboard shortcuts
+Ctrl+C   # send SIGINT to current process (usually terminates it)
+Ctrl+Z   # send SIGTSTP (suspend current process) — use fg to resume
+Ctrl+D   # send EOF on stdin (exits shell if no command is running)
+Ctrl+L   # clear screen (same as 'clear' but instant)
+Ctrl+A   # move cursor to beginning of line
+Ctrl+E   # move cursor to end of line
+Ctrl+W   # delete word to the left of cursor
+Ctrl+U   # delete from cursor to beginning of line
+Alt+.    # insert last argument of previous command (very useful!)
+
+# Brace expansion (generates argument lists)
+echo file{1,2,3}.txt      # file1.txt file2.txt file3.txt
+mkdir -p /opt/{bin,lib,conf,logs}
+cp config.yaml config.yaml.{bak,$(date +%Y%m%d)}
 \`\`\`
 
-> **Tip:** Run \`man ls\` to read the manual for any command. Press \`q\` to exit. \`tldr ls\` (install tldr) shows practical examples.
+## Common Mistakes
+
+**Using \`rm -rf\` without \`ls\` first**: Always preview with \`ls\` or \`echo\` before destructive commands. The shell expands globs before passing to \`rm\`, so \`rm -rf *.log\` is safe — but \`rm -rf *.log\` typed as \`rm -rf *. log\` (note the space) deletes everything in the current directory plus a file named \`log\`.
+
+**Forgetting quotes around variables**: \`rm $filename\` will misbehave if \`$filename\` contains spaces. Always quote: \`rm "$filename"\`.
+
+**Using \`>>\` when you meant \`>\`**: \`>>\` appends; \`>\` overwrites. Accidentally appending to a file for days can cause disk full incidents.
+
+**Confusing \`source\` and \`./\`**: \`source script.sh\` runs in the current shell (affects your session). \`./script.sh\` runs in a subprocess (isolated). Use \`source\` for virtual environments (\`source venv/bin/activate\`) and profile files.
+
+> **Tip:** Run \`man ls\` to read the manual for any command. Press \`q\` to exit. \`tldr ls\` (install with \`npm install -g tldr\` or \`pip install tldr\`) shows practical examples with less noise.
 `,
         },
         {
@@ -226,97 +560,279 @@ Ctrl+E   # move to end of line
           ],
           content: `# File Permissions & Ownership
 
-Linux controls access to files through a permission system based on **owner**, **group**, and **others**.
+Linux controls access to every file and directory through a permission system. Understanding it deeply — not just memorizing chmod numbers — is essential for security hardening, debugging access errors, and writing correct deployment scripts.
 
-## Reading Permissions
+## The Inode: Where Permissions Actually Live
+
+Permissions are stored in the file's **inode**, not in the directory. An inode is a data structure in the filesystem that stores all metadata about a file except its name. The directory entry just maps a filename to an inode number.
+
+\`\`\`bash
+# See the inode number of a file
+ls -i /etc/passwd
+# 1234567 /etc/passwd  ← inode number
+
+# The inode stores:
+# - File type (regular file, directory, symlink, socket, device)
+# - Permission bits (rwxrwxrwx + setuid/setgid/sticky)
+# - Owner UID and Group GID
+# - Number of hard links
+# - File size
+# - Access, modification, and change timestamps
+# - Pointers to data blocks on disk (the actual content)
+# NOT stored in inode: the filename (that's in the directory entry)
+\`\`\`
+
+This design means hard links work: two directory entries can point to the same inode (same content, same permissions). Changing permissions through one name affects both, because there's only one inode. Symbolic links, by contrast, are separate inodes pointing to a path string.
+
+## Reading the Permission String
 
 \`\`\`bash
 ls -la /etc/passwd
 # -rw-r--r-- 1 root root 2847 Jan 15 09:12 /etc/passwd
-# ↑ ↑↑↑↑↑↑↑↑↑
-# │ ││││││││└─ others: r-- (read only)
-# │ ││││││└── group:  r-- (read only)
-# │ ││││└──── owner:  rw- (read + write)
-# │ └──────── file type: - (regular), d (dir), l (link)
-# └────────── permissions
+#
+# Position by position:
+# [0]    - = regular file
+#           d = directory
+#           l = symbolic link
+#           c = character device (/dev/tty)
+#           b = block device (/dev/sda)
+#           p = named pipe (FIFO)
+#           s = socket (/run/docker.sock)
+#
+# [1-3]  rw- = owner permissions (root can read and write)
+# [4-6]  r-- = group permissions (root group members can only read)
+# [7-9]  r-- = others permissions (everyone else can only read)
+#
+# [10]   1   = number of hard links to this inode
+# [11]   root = owner username
+# [12]   root = group name
+# [13]   2847 = size in bytes
+# [14-18] Jan 15 09:12 = last modification time
+
+ls -la /usr/bin/passwd
+# -rwsr-xr-x 1 root root 68208 Apr 16 2023 /usr/bin/passwd
+#     ↑
+#     s = setuid bit (owner execute position shows 's' not 'x')
 \`\`\`
 
-## Permission Values
+## Permission Bits in Binary: Why Octal Makes Sense
 
-| Symbol | Octal | Meaning |
-|--------|-------|---------|
-| r | 4 | Read |
-| w | 2 | Write |
-| x | 1 | Execute |
-| - | 0 | No permission |
+Each permission triple (rwx) maps directly to 3 binary bits:
 
-**Common combinations:**
-- \`rwx\` = 7 (full access)
-- \`rw-\` = 6 (read/write)
-- \`r-x\` = 5 (read/execute)
-- \`r--\` = 4 (read only)
+\`\`\`
+r = 4 = 100 in binary
+w = 2 = 010 in binary
+x = 1 = 001 in binary
+- = 0 = 000 in binary
+
+So: rwx = 4+2+1 = 7 = 111 in binary
+    rw- = 4+2+0 = 6 = 110 in binary
+    r-x = 4+0+1 = 5 = 101 in binary
+    r-- = 4+0+0 = 4 = 100 in binary
+    --- = 0+0+0 = 0 = 000 in binary
+
+644 = rw-r--r-- = owner:6(rw-) group:4(r--) others:4(r--)
+755 = rwxr-xr-x = owner:7(rwx) group:5(r-x) others:5(r-x)
+700 = rwx------ = owner:7(rwx) group:0(---) others:0(---)
+\`\`\`
+
+**Why 644 and 755 are the universal defaults:**
+- **644** is correct for most data files (config files, HTML, source code): the owner can edit them, everyone can read them
+- **755** is correct for executables and directories: the owner can manage them, everyone can traverse/execute
+- **600** is for private data only the owner should access (SSH private keys, secrets)
+- **700** is for directories only the owner should enter (like \`~/.ssh\`)
 
 ## chmod — Change Permissions
 
 \`\`\`bash
-# Octal notation
-chmod 755 script.sh      # rwxr-xr-x (owner: all, group+others: r+x)
-chmod 644 config.txt     # rw-r--r-- (owner: r+w, others: read)
-chmod 600 ~/.ssh/id_rsa  # rw------- (owner only)
-chmod 700 ~/.ssh/        # rwx------ (dir: owner only)
+# Octal notation (the most precise and idiomatic)
+chmod 755 script.sh      # rwxr-xr-x
+chmod 644 config.txt     # rw-r--r--
+chmod 600 ~/.ssh/id_rsa  # rw------- (SSH requires this — will refuse to use if too permissive)
+chmod 700 ~/.ssh/        # rwx------ (SSH requires this on the directory)
+chmod 400 secret.key     # r-------- (read-only, even for owner — prevents accidental overwrite)
 
-# Symbolic notation
-chmod u+x script.sh      # add execute for owner (u=user)
-chmod g-w file.txt       # remove write from group
-chmod o-r secret.txt     # remove read from others
-chmod a+r public.txt     # add read for all (a=all)
-chmod u=rwx,g=rx,o=r file.sh  # set explicitly
+# Symbolic notation (easier to read and safer for relative changes)
+chmod u+x script.sh      # add execute for owner only (u=user/owner)
+chmod g-w file.txt       # remove write from group (g=group)
+chmod o-r secret.txt     # remove read from others (o=others)
+chmod a+r public.txt     # add read for ALL (a=all: owner+group+others)
+chmod go-rwx private/    # remove all permissions from group and others
+chmod u=rwx,go=rx dir/   # set explicitly: owner full, group+others read+execute
 
-# Recursive
+# Recursive — apply to all files and subdirectories
 chmod -R 755 /var/www/html/
+# WARNING: chmod -R 755 sets both directories AND files to 755
+# Files should be 644, not 755 (no execute on data files)
+# Correct approach:
+find /var/www -type d -exec chmod 755 {} +   # directories: 755
+find /var/www -type f -exec chmod 644 {} +   # files: 644
 \`\`\`
 
 ## chown — Change Ownership
 
 \`\`\`bash
-chown alice file.txt          # change owner
-chown alice:developers file.txt  # change owner and group
-chown :developers file.txt    # change group only
-chgrp developers file.txt     # change group (alternative)
+chown alice file.txt              # change owner to alice
+chown alice:developers file.txt   # change owner AND group
+chown :developers file.txt        # change group only (owner unchanged)
+chgrp developers file.txt         # alternative way to change group only
 
-chown -R www-data:www-data /var/www/  # recursive
+chown -R www-data:www-data /var/www/   # recursive: all files and subdirs
+# -R: recursive, like chmod -R
+
+# Verify after changing
+ls -la file.txt
+stat file.txt   # detailed view: Uid, Gid, Access, Modify, Change times
 \`\`\`
 
-## umask — Default Permissions
+## umask — Default Permission Mask
+
+The umask subtracts from the maximum permission when files and directories are created. It is not subtraction — it is a bitmask (the umask bits are REMOVED from the default).
 
 \`\`\`bash
-umask            # show current umask (usually 022)
-# Files created with 666 - 022 = 644 (rw-r--r--)
-# Dirs created with  777 - 022 = 755 (rwxr-xr-x)
+umask           # show current mask (usually 022 for root, 022 for users)
+# 022 means: remove write (2) from group and others
 
-umask 027        # tighten: files=640, dirs=750
+# How it works:
+# Files default max:       666 (rw-rw-rw-) — never executable by default
+# Dirs default max:        777 (rwxrwxrwx)
+# umask 022 removes:       --- -w- -w-
+# Result for files:        644 (rw-r--r--)
+# Result for dirs:         755 (rwxr-xr-x)
+
+# Tighter umask for security-sensitive environments
+umask 027       # files=640 (rw-r-----), dirs=750 (rwxr-x---)
+                # Others get NO access at all
+umask 077       # files=600, dirs=700 — only owner can access anything (paranoid)
+
+# Set permanently in ~/.bashrc or /etc/profile
+echo "umask 022" >> ~/.bashrc
 \`\`\`
 
-## Special Bits
+## Special Permission Bits: setuid, setgid, Sticky
+
+Beyond the basic rwx bits, three special bits exist with important security implications:
 
 \`\`\`bash
-# Setuid (4): run executable as owner (not caller)
-chmod u+s /usr/bin/passwd   # passwd runs as root regardless of who calls
+# SETUID (octal 4000): executable runs with file OWNER's privileges
+# The 'x' in owner position becomes 's'
+chmod u+s /usr/bin/passwd   # set setuid bit
+chmod 4755 /usr/bin/passwd  # same: 4 = setuid, 755 = normal perms
+
 ls -la /usr/bin/passwd
-# -rwsr-xr-x  (s in owner execute position)
+# -rwsr-xr-x root root  ← 's' means setuid+execute
+# 's' = setuid WITH execute; 'S' = setuid WITHOUT execute (misconfiguration)
 
-# Setgid (2): on dir, new files inherit group
-chmod g+s /shared/
-# New files in /shared get the group of the directory
+# Real example: passwd needs root to modify /etc/shadow
+# A regular user runs passwd → it executes as root (due to setuid)
+# passwd then verifies the user's identity before allowing password change
 
-# Sticky bit (1): on dir, only owner can delete their files
+# SETGID on FILE (octal 2000): runs with the file's GROUP's privileges
+chmod g+s /usr/bin/wall
+ls -la /usr/bin/wall
+# -rwxr-sr-x root tty  ← runs as group 'tty', allowing write to terminals
+
+# SETGID on DIRECTORY: new files inherit the directory's group
+mkdir /shared/teamdata
+chgrp developers /shared/teamdata
+chmod g+s /shared/teamdata   # setgid on the directory
+# Now any file created inside /shared/teamdata automatically
+# gets group 'developers', not the creator's primary group
+# Essential for shared team directories
+
+# STICKY BIT (octal 1000): only the file owner can delete/rename their file
 chmod +t /tmp
 ls -ld /tmp
-# drwxrwxrwt (t in others execute position)
-# /tmp: anyone can write, only owner can delete their own files
+# drwxrwxrwt  ← 't' in others execute position
+# Anyone can write files to /tmp
+# But only each file's owner (and root) can delete it
+# Prevents user A from deleting user B's temporary files
+
+# Combined special bits:
+chmod 1777 /tmp           # sticky + rwxrwxrwx
+chmod 2755 /usr/bin/wall  # setgid + rwxr-xr-x
+chmod 4755 /usr/bin/sudo  # setuid + rwxr-xr-x
 \`\`\`
 
-> **Security rule:** World-writable files (chmod 777) are dangerous on servers. Always use the minimum permissions needed.
+## Access Control Lists (ACLs) — Beyond rwx
+
+Standard Unix permissions only allow three classes: owner, group, others. ACLs let you set permissions for arbitrary users and groups:
+
+\`\`\`bash
+# View ACLs on a file
+getfacl /var/www/html/index.html
+# # file: var/www/html/index.html
+# # owner: www-data
+# # group: www-data
+# user::rw-
+# group::r--
+# other::r--
+
+# Give a specific user read+write access
+setfacl -m u:alice:rw /var/www/html/index.html
+
+# Give a group read access
+setfacl -m g:developers:r /etc/app/config.yaml
+
+# Recursive ACL (apply to all files in a directory)
+setfacl -R -m u:alice:rwx /var/www/html/
+
+# Default ACL: files created in this directory inherit these ACLs
+setfacl -d -m u:alice:rwx /var/www/html/
+
+# Remove an ACL entry
+setfacl -x u:alice /var/www/html/index.html
+
+# Remove all ACLs
+setfacl -b /var/www/html/index.html
+
+# ls shows + when ACLs are present
+ls -la /var/www/html/index.html
+# -rw-rw-r--+ ← the '+' indicates ACL exists
+\`\`\`
+
+## How It Works Internally
+
+When the kernel checks if a process can access a file, it evaluates in this order:
+
+1. Is the process UID 0 (root)? Root bypasses all permission checks (with some exceptions for capabilities).
+2. Is the process's EUID (effective user ID) the file's owner? Apply owner bits.
+3. Is the process's EGID or any supplementary GID the file's group? Apply group bits.
+4. Otherwise: apply others bits.
+
+**Only one set of bits applies.** If you are the file's owner but your permissions are \`r--\` while the group has \`rwx\`, you only get \`r--\` — the owner bits apply to you, not the group bits.
+
+## Common Mistakes
+
+**chmod -R 777**: This is almost always wrong. It makes all files executable and writable by everyone. On a web server, it allows any user to inject malicious code. Use the find-based approach to set files and directories separately.
+
+**Forgetting to set permissions on the .ssh directory**: SSH is paranoid — it will refuse to use private keys if \`~/.ssh\` is group- or world-accessible. Always: \`chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_*\`.
+
+**Using chmod 644 on shell scripts**: A file with \`rw-r--r--\` cannot be executed, even by the owner. Scripts need the execute bit: \`chmod 755 script.sh\`.
+
+**The setuid 'S' vs 's' confusion**: Lowercase \`s\` = setuid + execute set (correct). Uppercase \`S\` = setuid set but execute NOT set (the program cannot run — likely a mistake).
+
+## Production Usage
+
+\`\`\`bash
+# Audit SUID/SGID binaries (security check — these can escalate privileges)
+find / -type f \( -perm /4000 -o -perm /2000 \) 2>/dev/null | sort
+
+# Find world-writable files (potential security risk outside /tmp)
+find /etc /usr /bin /sbin -type f -perm -0002 2>/dev/null
+
+# Correctly set up a web application directory
+chown -R www-data:www-data /var/www/myapp/
+find /var/www/myapp -type d -exec chmod 755 {} +
+find /var/www/myapp -type f -exec chmod 644 {} +
+chmod 600 /var/www/myapp/config/database.yml   # secrets: only app user reads
+
+# Service account for an application
+useradd --system --no-create-home --shell /usr/sbin/nologin myapp
+chown -R myapp:myapp /opt/myapp
+chmod 750 /opt/myapp               # app user + group can access, others cannot
+chmod 640 /opt/myapp/config.env    # app can read, group can read, others cannot
+\`\`\`
 `,
         },
         {
@@ -332,93 +848,290 @@ ls -ld /tmp
           ],
           content: `# Users, Groups & sudo
 
-## Key Files
+Linux is a multi-user operating system — its permission model, process isolation, and security architecture all revolve around users and groups. Understanding this system deeply is fundamental to both operations and security.
+
+## The User Database: /etc/passwd
+
+Every user account is a line in \`/etc/passwd\`. Despite the name, passwords are NOT stored here — they moved to \`/etc/shadow\` decades ago for security:
 
 \`\`\`bash
-cat /etc/passwd   # user accounts
+cat /etc/passwd
 # root:x:0:0:root:/root:/bin/bash
-# sooraj:x:1000:1000:Sooraj:/home/sooraj:/bin/bash
-# nginx:x:33:33::/var/cache/nginx:/sbin/nologin
-# Format: username:password:UID:GID:comment:home:shell
+# daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin
+# www-data:x:33:33:www-data:/var/www:/usr/sbin/nologin
+# sooraj:x:1000:1000:Sooraj,,,:/home/sooraj:/bin/bash
+# postgres:x:112:118:PostgreSQL administrator,,,:/var/lib/postgresql:/bin/bash
+#
+# Field breakdown (colon-separated):
+# 1: username
+# 2: password placeholder (x = in /etc/shadow, * = locked account, blank = no password)
+# 3: UID (User ID) — 0 = root, 1-999 = system accounts, 1000+ = human users
+# 4: GID (primary Group ID) — references /etc/group
+# 5: GECOS field (full name, office, phone — or just the username)
+# 6: home directory
+# 7: login shell (/bin/bash = interactive, /usr/sbin/nologin = cannot log in)
+\`\`\`
 
-cat /etc/shadow   # hashed passwords (root only)
-# sooraj:\$6\$salt\$hashed_password:19000:0:99999:7:::
+**The /usr/sbin/nologin shell**: Service accounts (nginx, postgres, www-data) use this as their shell. If someone tries to log in as www-data, the nologin binary runs, prints "This account is currently not available", and exits. This is a security measure — services should not be directly accessible as login accounts.
 
-cat /etc/group    # groups
+## The Shadow Password File: /etc/shadow
+
+\`\`\`bash
+sudo cat /etc/shadow   # requires root or shadow group
+# sooraj:\$6\$rounds=65536\$salt\$hashedpassword:19000:0:99999:7:::
+#
+# Field breakdown:
+# 1: username
+# 2: hashed password
+#    $6$  = SHA-512 (most common, strongest)
+#    $5$  = SHA-256
+#    $1$  = MD5 (old, weak — should not be in use)
+#    $2a$ = bcrypt
+#    !    = account locked (prepended to hash)
+#    *    = no password set (cannot login with password)
+# 3: last password change (days since Jan 1, 1970)
+# 4: minimum days before password can be changed (0 = any time)
+# 5: maximum days password is valid (99999 = effectively never expires)
+# 6: warning days before expiry
+# 7: days after expiry until account is disabled
+# 8: account expiration date (blank = never)
+
+# Check password aging for an account
+chage -l sooraj
+# Last password change: Jan 01, 2024
+# Password expires: never
+# Account expires: never
+\`\`\`
+
+## The Groups Database: /etc/group
+
+\`\`\`bash
+cat /etc/group
 # sudo:x:27:sooraj,alice
 # docker:x:999:sooraj
-# Format: groupname:password:GID:members
+# developers:x:1001:alice,bob,charlie
+#
+# Field breakdown:
+# 1: group name
+# 2: group password (x = in /etc/gshadow, rarely used)
+# 3: GID (Group ID)
+# 4: supplementary members (comma-separated)
+
+# A user's PRIMARY group is set in /etc/passwd field 4
+# SUPPLEMENTARY groups are listed in /etc/group
+# When you run id: gid=1000(sooraj) groups=1000(sooraj),27(sudo),999(docker)
+#                   ↑ primary                  ↑ supplementary groups
+\`\`\`
+
+## PAM: Pluggable Authentication Modules
+
+sudo and login do not directly check /etc/shadow. They go through **PAM** — a framework that allows authentication to be configured and extended without recompiling applications.
+
+\`\`\`bash
+# PAM config files live in /etc/pam.d/
+ls /etc/pam.d/
+# sudo, login, sshd, su, passwd, ...
+
+# Example: /etc/pam.d/sudo
+# auth required pam_env.so
+# auth sufficient pam_unix.so nullok_secure
+# auth required pam_deny.so
+#
+# Each line: type  control  module  args
+# type: auth (verify identity), account (check account validity),
+#       password (change password), session (set up environment)
+# control: required (must pass), sufficient (can pass without others),
+#          optional (result doesn't matter unless all others are neutral)
+
+# PAM allows: LDAP auth, TOTP (Google Authenticator), smart cards,
+# Kerberos, even custom scripts — all without changing sudo's source code
 \`\`\`
 
 ## Managing Users
 
 \`\`\`bash
-# Create user
+# Create a user (useradd is lower-level; adduser is a friendlier wrapper on Debian)
 useradd -m -s /bin/bash -c "Alice Smith" alice
-# -m: create home dir  -s: shell  -c: comment/full name
+# -m: create home directory at /home/alice
+# -s: set login shell
+# -c: GECOS comment field (full name)
 
-passwd alice                    # set password
-useradd -m -G sudo,docker alice # add to supplementary groups
+# Add to supplementary groups at creation time
+useradd -m -G sudo,docker,developers alice
 
-# Modify user
-usermod -aG docker alice        # append to docker group (-a = append)
-usermod -s /bin/zsh alice       # change shell
-usermod -L alice                # lock account
-usermod -U alice                # unlock account
+# Set password
+passwd alice                    # interactive password prompt
+echo 'alice:newpassword' | chpasswd   # non-interactive (for automation)
+openssl passwd -6 'mypassword'  # generate SHA-512 hash for /etc/shadow
+
+# Modify existing user
+usermod -aG docker alice        # -a = APPEND; without -a it REPLACES groups (dangerous!)
+usermod -s /bin/zsh alice       # change login shell
+usermod -L alice                # Lock: prepend ! to password hash
+usermod -U alice                # Unlock: remove the ! prefix
+usermod -e 2024-12-31 alice     # set account expiry date
+usermod -d /new/home alice      # change home directory path
 
 # Delete user
-userdel alice                   # keep home dir
-userdel -r alice                # delete home dir too
+userdel alice                   # remove account, keep /home/alice
+userdel -r alice                # -r: also delete home directory and mail spool
+# TIP: Never delete a user whose processes might still be running
 
-# View user info
-id alice                        # uid=1001(alice) gid=1001(alice) groups=...
-who                             # who is logged in
-w                               # who + what they're doing
-last                            # login history
+# View user information
+id alice                        # uid=1001(alice) gid=1001(alice) groups=1001(alice),27(sudo)
+getent passwd alice             # look up from any source (local file, LDAP, NIS)
+who                             # who is logged in right now
+w                               # who + what command they're running + idle time
+last                            # login/logout history from /var/log/wtmp
+lastlog                         # last login time for every user
 \`\`\`
 
 ## Managing Groups
 
 \`\`\`bash
-groupadd developers
-groupdel developers
-groupmod -n devs developers     # rename group
+groupadd developers              # create a group
+groupadd -g 1500 backend         # create with specific GID
+groupdel developers              # delete (removes from /etc/group and /etc/gshadow)
+groupmod -n devs developers      # rename a group
+groupmod -g 1600 developers      # change GID (dangerous — affects file ownership)
 
-groups sooraj                   # list user's groups
+groups alice                     # list all groups alice belongs to
+getent group docker              # look up group info
+
+# Add a user to a group interactively
+gpasswd -a alice docker          # equivalent to usermod -aG docker alice
+gpasswd -d alice docker          # remove alice from docker group
+
+# The critical gotcha: group membership changes don't apply to running sessions
+# After usermod -aG docker alice, alice must LOG OUT and back IN
+# (or run: newgrp docker — to start a new shell with the new group)
+id    # run as alice to confirm groups include docker
 \`\`\`
 
-## sudo Configuration
+## sudo: The Security Bridge
+
+sudo (substitute user do) is how non-root users perform privileged operations. It is far more than just "run as root" — it provides:
+- Granular control over which commands each user can run
+- Mandatory logging of every sudo invocation
+- Password verification before privilege escalation
+- The ability to run as ANY user, not just root
+
+**The /etc/sudoers format:**
 
 \`\`\`bash
-# Edit sudoers safely
-visudo                          # validates syntax before saving
+# Always edit with visudo — it validates syntax and locks the file
+# A syntax error in sudoers can lock you out of sudo entirely
+visudo
+visudo -f /etc/sudoers.d/alice   # edit a drop-in file
 
-# /etc/sudoers format:
-# user  host=(runas)  commands
-root    ALL=(ALL:ALL) ALL
-alice   ALL=(ALL)     ALL              # full sudo
-bob     ALL=(ALL)     NOPASSWD: ALL    # no password prompt
-deploy  ALL=(root)    /usr/bin/systemctl restart nginx  # specific command only
+# Syntax: who  where=(as_whom)  commands
+# user    host=(runas_user:runas_group)  [options:]  commandlist
 
-# Group-based (preferred)
-%sudo   ALL=(ALL:ALL) ALL
-%wheel  ALL=(ALL)     ALL
+# Examples:
+root    ALL=(ALL:ALL) ALL           # root can run anything as anyone
+alice   ALL=(ALL)     ALL           # alice has full sudo
+bob     ALL=(ALL)     NOPASSWD: ALL # bob doesn't need a password (use sparingly)
 
-# Drop-in files (safer than editing sudoers directly)
-echo "alice ALL=(ALL) NOPASSWD: /usr/bin/apt" > /etc/sudoers.d/alice
-chmod 440 /etc/sudoers.d/alice
+# Principle of least privilege: only allow specific commands
+deploy  ALL=(root) NOPASSWD: /usr/bin/systemctl restart myapp.service
+deploy  ALL=(root) NOPASSWD: /usr/bin/systemctl reload nginx
+
+# Group-based sudo (% prefix = group) — preferred over individual entries
+%sudo   ALL=(ALL:ALL) ALL           # members of 'sudo' group have full sudo
+%wheel  ALL=(ALL)     ALL           # RHEL/CentOS convention (same as sudo group)
+%dba    ALL=(root)    /usr/bin/psql, /usr/bin/pg_dump
+
+# What ALL means:
+# First ALL  = any host (matters if one sudoers file is shared across servers)
+# Second ALL = can run as any user
+# Third ALL  = can run any command
+
+# Drop-in files in /etc/sudoers.d/ (safer — one config per application/user)
+echo "alice ALL=(ALL) NOPASSWD: /usr/bin/apt" | sudo tee /etc/sudoers.d/alice
+sudo chmod 440 /etc/sudoers.d/alice    # must be mode 0440, not 0600 or 0644
 \`\`\`
 
-## Switching Users
+## su vs. sudo: Security Differences
 
 \`\`\`bash
-su - alice                      # switch to alice (- loads full env)
-sudo -i                         # root shell
-sudo -u alice command           # run as alice
-sudo !!                         # run last command as root
+# su: Switch User — requires the TARGET USER'S password
+su - alice                  # switch to alice (requires alice's password)
+su -                        # switch to root (requires ROOT's password)
+# The - flag: loads the full login environment (PATH, HOME, etc.)
+# Without -: you switch user but keep current environment (often causes issues)
+
+# sudo: use YOUR password to run as another user
+sudo -u alice command       # run as alice (uses YOUR password)
+sudo -i                     # interactive root shell (loads root's full environment)
+sudo su -                   # bad practice: sudo to run su as root
+sudo -l                     # list what sudo rules apply to you
+
+# Security comparison:
+# su: requires knowing the target user's password
+#     → to give root access to a new admin, you'd have to share the root password
+# sudo: each admin uses their own password
+#       → full audit trail: "alice ran systemctl restart nginx at 14:32"
+#       → revoke access by removing from sudoers without changing root password
+#       → granular control: alice can restart nginx but not reboot the server
+
+# sudo best practices:
+sudo !!                     # run the LAST command with sudo (after forgetting)
+sudo -v                     # refresh sudo timestamp (extend grace period)
+sudo -k                     # immediately expire sudo timestamp (security)
 \`\`\`
 
-> **Security:** Never use \`root\` for daily work. Create a regular user with sudo access. Disable root SSH login.
+## How It Works Internally
+
+When you run \`sudo systemctl restart nginx\`:
+
+1. sudo checks \`/etc/sudoers\` (and \`/etc/sudoers.d/\`) for a matching rule
+2. If a password is required, sudo calls PAM (\`/etc/pam.d/sudo\`) to authenticate you
+3. PAM checks your password against \`/etc/shadow\` (or LDAP, etc.)
+4. sudo forks, sets the child's UID/GID to root (via \`setuid(0)\`)
+5. sudo logs the invocation to \`/var/log/auth.log\` and journald
+6. The child process exec()s \`systemctl restart nginx\`
+
+Every sudo invocation appears in the log:
+\`\`\`bash
+grep sudo /var/log/auth.log | tail -5
+# Jan 15 14:32:01 server sudo: alice : TTY=pts/0 ; PWD=/home/alice ;
+#   USER=root ; COMMAND=/usr/bin/systemctl restart nginx
+\`\`\`
+
+## Common Mistakes
+
+**\`usermod -G\` without \`-a\`**: \`usermod -G docker alice\` REPLACES alice's supplementary groups with just \`docker\`. She loses sudo membership. Always use \`-aG\` to append.
+
+**Not logging out after group changes**: New group memberships only take effect in new login sessions. Run \`id\` to verify current groups.
+
+**Using NOPASSWD for entire sudo**: \`bob ALL=(ALL) NOPASSWD: ALL\` means if bob's laptop is compromised, the attacker has silent root. Scope NOPASSWD to specific commands only.
+
+**Editing /etc/sudoers directly**: A syntax error locks you out of sudo. Use \`visudo\` which validates syntax before saving.
+
+## Production Usage
+
+\`\`\`bash
+# Create a service account for an application (cannot log in)
+useradd --system --no-create-home --shell /usr/sbin/nologin myapp
+
+# Verify it cannot be logged into
+su - myapp
+# This account is currently not available
+
+# Set up a deploy user with restricted sudo
+echo "deploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart myapp.service" \
+  | sudo tee /etc/sudoers.d/deploy-user
+sudo chmod 440 /etc/sudoers.d/deploy-user
+
+# Audit which users have sudo access
+grep -r '^[^#]' /etc/sudoers /etc/sudoers.d/ 2>/dev/null
+
+# Find all users with a shell (can potentially log in)
+grep -v '/nologin\|/false' /etc/passwd | cut -d: -f1,7
+
+# Find users with UID 0 (all are effectively root)
+awk -F: '\$3 == 0 {print \$1}' /etc/passwd
+\`\`\`
 `,
         },
       ],
@@ -683,101 +1396,315 @@ sort file.txt | uniq -d      # only show duplicates
           ],
           content: `# Processes & Signals
 
+Every program running on Linux is a process. Understanding how processes are created, how they communicate through signals, and how the kernel manages them is fundamental to diagnosing production issues — from hung services to memory pressure to zombie accumulation.
+
+## The Process Lifecycle: fork → exec → wait → exit
+
+Linux does not "create" processes from scratch. It copies them. Every process (except PID 1) comes into existence via \`fork()\`:
+
+\`\`\`
+Parent Process (bash)
+│
+│ fork()
+├──────────────────┐
+│ (parent)         │ (child — exact copy of parent)
+│ wait() blocks    │ exec("/usr/bin/ls", ["-la"])
+│                  │
+│                  │ ls runs, outputs directory listing
+│                  │
+│                  │ exit(0)
+│ wait() returns   │
+│ collects exit    │ (kernel cleans up child's process table entry)
+│ code = 0         │
+└──────────────────┘
+\`\`\`
+
+**Copy-on-write**: After \`fork()\`, the child does not immediately get its own copy of all memory. Instead, parent and child share the same physical memory pages, marked read-only. Only when either process writes to a page does the kernel create a private copy. This makes \`fork()\` very fast even for large processes.
+
+**The process table**: The kernel maintains a table of all processes. Each entry (a \`task_struct\` in the kernel source) holds the PID, PPID, UID/GID, memory mappings, open file descriptors, signal handlers, scheduling state, and more. The \`/proc/<PID>/\` virtual filesystem exposes most of this information.
+
+## Process Identifiers
+
+\`\`\`bash
+# Every process has:
+# PID   (Process ID) — unique identifier
+# PPID  (Parent PID) — who created this process
+# UID   — which user owns the process
+# GID   — which group owns the process
+# PGID  (Process Group ID) — for signaling groups of related processes
+# SID   (Session ID) — for terminal control
+
+# View your own process IDs
+echo "My PID: $$"           # $$ = current shell PID
+echo "My PPID: $PPID"       # PPID = parent shell
+
+# See the full picture
+ps -p $$ -o pid,ppid,pgid,sid,user,comm
+\`\`\`
+
 ## Viewing Processes
 
 \`\`\`bash
-ps aux                    # all processes, user-oriented format
-# USER  PID %CPU %MEM VSZ RSS TTY STAT START TIME COMMAND
+# ps: snapshot of current processes
+ps aux                    # all processes, BSD format
+# USER  PID %CPU %MEM   VSZ    RSS TTY   STAT START   TIME COMMAND
+# root    1  0.0  0.1 167748  9312 ?     Ss   Jan01   0:05 /sbin/init
+# nginx 1234  0.1  0.2  55200 18432 ?    S    10:00   0:01 nginx: worker
+#
+# VSZ = virtual memory size (total mapped, including not-yet-used)
+# RSS = resident set size (actually in RAM right now)
+# STAT = process state (see below)
+# TIME = total CPU time consumed (not wall clock time!)
 
-ps aux | grep nginx       # find nginx processes
-ps -ef                    # full format (PPID visible)
-ps --forest               # show process tree
-pstree                    # process tree (install: apt install psmisc)
+ps -ef                    # full format, shows PPID
+ps --forest               # tree view showing parent-child relationships
+ps aux --sort=-%cpu       # sorted by CPU usage (most hungry first)
+ps aux --sort=-%mem       # sorted by memory usage
+ps -u alice               # processes owned by user alice
 
-pgrep nginx               # find PID by name
-pgrep -u root             # processes owned by root
-pidof nginx               # PIDs of nginx
+# pgrep/pkill: search by name
+pgrep nginx               # list PIDs matching "nginx"
+pgrep -l nginx            # include process name in output
+pgrep -u root             # all processes owned by root
+pgrep -a python           # show full command line
 
-top                       # interactive process viewer
-# Keys: q=quit, k=kill, r=renice, M=sort by memory, P=sort by CPU
-htop                      # enhanced top (apt install htop)
+# pidof: find PIDs by exact name
+pidof nginx               # PIDs where the executable name is exactly "nginx"
+
+# Interactive viewers
+top                       # real-time process monitor
+# Keybindings: q=quit, k=kill (enter PID), r=renice, M=sort by memory,
+#              P=sort by CPU, 1=show individual CPUs, f=fields config
+
+htop                      # enhanced top with mouse support (apt install htop)
+# Keybindings: F5=tree view, F6=sort, F9=kill, F10=quit
 \`\`\`
 
 ## Process States
 
-| State | Symbol | Meaning |
-|-------|--------|---------|
-| Running | R | Currently executing |
-| Sleeping | S | Waiting (interruptible) |
-| Disk sleep | D | Waiting for I/O (uninterruptible) |
-| Stopped | T | Paused (Ctrl+Z) |
-| Zombie | Z | Dead but not reaped |
+The STAT column in \`ps\` output tells you what a process is doing right now:
 
-## Signals
+| State | Symbol | Meaning | What's happening |
+|---|---|---|---|
+| Running | R | On CPU or runnable | Actively executing or waiting for CPU |
+| Sleeping | S | Interruptible wait | Waiting for I/O, timer, or signal (can be interrupted) |
+| Disk sleep | D | Uninterruptible wait | Waiting for disk/network I/O — cannot be interrupted or killed |
+| Stopped | T | Paused | Ctrl+Z sent, or ptrace (debugger) attached |
+| Zombie | Z | Dead but not reaped | Exited but parent hasn't called wait() yet |
+| Idle | I | Kernel thread idle | Kernel worker thread with no work to do |
+
+**The D state is critical**: A process in D (uninterruptible sleep) cannot be killed with SIGKILL. It is waiting for the kernel to complete an I/O operation. A machine with many D-state processes is usually stuck waiting on a hung NFS mount, failing disk, or network storage. The load average includes D-state processes — this is why load can be high even with no CPU activity.
+
+## Signals: Inter-Process Communication
+
+Signals are software interrupts sent by the kernel, another process, or the user. When a process receives a signal, its current execution is interrupted and a signal handler runs (or the default action occurs).
 
 \`\`\`bash
-# Common signals
-kill -l                   # list all signals
+# List all signals
+kill -l
+# 1) SIGHUP    2) SIGINT    3) SIGQUIT   4) SIGILL    5) SIGTRAP
+# 6) SIGABRT   7) SIGBUS    8) SIGFPE    9) SIGKILL  10) SIGUSR1
+# 11) SIGSEGV 12) SIGUSR2  13) SIGPIPE  14) SIGALRM  15) SIGTERM
+# 19) SIGSTOP 20) SIGTSTP  18) SIGCONT
 
-kill -15 <PID>            # SIGTERM — graceful shutdown (default)
-kill    <PID>             # same as -15
-kill -9 <PID>             # SIGKILL — force kill (no cleanup possible)
-kill -1 <PID>             # SIGHUP  — reload config (nginx, sshd)
-kill -2 <PID>             # SIGINT  — same as Ctrl+C
-kill -19 <PID>            # SIGSTOP — pause process
-kill -18 <PID>            # SIGCONT — continue paused process
+# The signals you'll use most:
+kill -15 <PID>    # SIGTERM (15) — "please shut down gracefully"
+                  # The DEFAULT signal when you run: kill <PID>
+                  # Process CAN ignore or catch this signal
+                  # Well-behaved apps close files, flush buffers, then exit
 
-killall nginx             # kill all processes named nginx
-killall -9 python3        # force kill all python3 processes
-pkill -u alice            # kill all processes by user alice
+kill -9 <PID>     # SIGKILL (9) — "you are dead NOW"
+                  # Sent DIRECTLY to the kernel — the process never sees it
+                  # CANNOT be caught, blocked, or ignored by any process
+                  # Downside: no cleanup — may leave locks, temp files behind
 
-# Always try SIGTERM before SIGKILL — give process time to clean up
+kill -1 <PID>     # SIGHUP (1) — originally "terminal hangup"
+                  # Conventionally means "reload your config"
+                  # nginx, sshd, rsyslog all reload on SIGHUP
+                  # Some processes exit on SIGHUP (shells, simple daemons)
+
+kill -2 <PID>     # SIGINT (2) — what Ctrl+C sends to the foreground process
+                  # "Interrupt" — many apps handle this like SIGTERM
+
+kill -19 <PID>    # SIGSTOP (19) — pause (like Ctrl+Z but from outside)
+                  # CANNOT be caught or ignored
+kill -18 <PID>    # SIGCONT (18) — resume a stopped process
+
+kill -3 <PID>     # SIGQUIT (3) — Ctrl+\\ ; like SIGTERM but also dumps core
+                  # Java processes print a thread dump on SIGQUIT
+
+# Signal delivery methods
+kill <PID>               # send SIGTERM to a specific PID
+kill -9 <PID>            # send SIGKILL
+kill -HUP <PID>          # signal by name
+kill 0                   # send signal to entire process GROUP
+killall nginx            # send SIGTERM to all processes named "nginx"
+killall -9 -u alice      # SIGKILL all of alice's processes
+pkill -f "python.*worker" # signal by full command line regex
+pkill -u alice           # signal all processes owned by alice
+\`\`\`
+
+## The /proc/PID Structure
+
+Every process has a directory under /proc that exposes its internals:
+
+\`\`\`bash
+ls /proc/1234/
+# cmdline  cwd -> /opt/myapp  environ  exe -> /usr/bin/python3
+# fd/  limits  maps  net/  status  ...
+
+# What command is this process running?
+cat /proc/1234/cmdline | tr '\\0' ' '
+# python3 /opt/myapp/server.py --port 3000
+
+# What directory is it running from?
+ls -la /proc/1234/cwd
+# /opt/myapp
+
+# What executable is it?
+ls -la /proc/1234/exe
+# /usr/bin/python3
+
+# Environment variables at startup
+cat /proc/1234/environ | tr '\\0' '\\n' | grep -E '^(PATH|HOME|NODE_ENV)'
+
+# Memory breakdown
+cat /proc/1234/status | grep -E 'VmRSS|VmSwap|VmPeak|Threads'
+# VmPeak: 512000 kB   ← peak memory usage
+# VmRSS:  256000 kB   ← current RAM usage (Resident Set Size)
+# VmSwap:      0 kB   ← swap usage (non-zero = memory pressure)
+# Threads: 8          ← number of threads in this process
+
+# Open file descriptors
+ls -la /proc/1234/fd/ | head -20
+# lrwxrwxrwx  0 -> /dev/null
+# lrwxrwxrwx  1 -> /var/log/app/access.log
+# lrwxrwxrwx  2 -> /var/log/app/error.log
+# lrwxrwxrwx  3 -> socket:[54321]   ← TCP connection
+
+# How many FDs is it using?
+ls /proc/1234/fd | wc -l
+
+# What are the limits?
+cat /proc/1234/limits | grep "open files"
+# Limit                     Soft Limit  Hard Limit
+# Max open files            1024        1048576
+# If soft limit is 1024 and you're using 1023 FDs → "too many open files" imminent
+\`\`\`
+
+## Zombie Processes
+
+Zombies accumulate when a parent process does not call \`wait()\` to collect its children's exit codes:
+
+\`\`\`bash
+# Find zombie processes
+ps aux | grep -w Z
+ps -eo pid,ppid,stat,comm | grep -w Z
+
+# A zombie holds a PID in the process table (wasting the PID slot)
+# but uses NO memory or CPU — the process is dead, just not collected
+
+# You CANNOT kill a zombie directly — it's already dead
+# kill -9 <zombie_pid>  does nothing
+
+# Solution: signal the PARENT to call wait()
+# Find the parent PID:
+ps -o ppid= -p <zombie_pid>
+
+# Option 1: Send SIGCHLD to the parent (asks parent to reap children)
+kill -CHLD <parent_pid>
+
+# Option 2: If the parent ignores SIGCHLD, kill the parent
+# The zombie gets reparented to PID 1 (systemd/init)
+# PID 1 always properly calls wait() — it will reap the zombie
+
+# Option 3: Last resort — reboot (not acceptable in production)
+# Fix the root cause: patch the parent application to properly wait() for children
 \`\`\`
 
 ## Background Jobs
 
 \`\`\`bash
-sleep 100 &               # run in background (&)
-jobs                      # list background jobs
-# [1]+ Running    sleep 100 &
-# [2]- Stopped    vim file.txt
+# Run in background (& appends to job list, returns prompt immediately)
+./longscript.sh &
+# [1] 12345   ← job number and PID
 
-fg                        # bring last job to foreground
-fg %1                     # bring job 1 to foreground
-bg %2                     # resume job 2 in background
+# List shell's background jobs
+jobs
+# [1]+  Running    ./longscript.sh &
+# [2]-  Stopped    vim config.yaml
 
-Ctrl+Z                    # suspend current job
-Ctrl+C                    # terminate current job
+# Bring job to foreground
+fg              # bring the most recent job
+fg %1           # bring job number 1
+
+# Send foreground job to background
+Ctrl+Z          # suspend it (SIGTSTP)
+bg %1           # resume it in background (SIGCONT)
 
 # Survive terminal close
-nohup ./script.sh &       # run detached from terminal
-nohup ./script.sh > out.log 2>&1 &
+nohup ./script.sh &                    # ignore SIGHUP; output to nohup.out
+nohup ./script.sh > /tmp/out.log 2>&1 &
+disown %1                              # remove from shell's job table
+                                       # (not affected by terminal close)
 
-disown %1                 # remove job from shell's job list
+# Better alternative: tmux or screen (proper terminal multiplexer)
+tmux new-session -d -s mysession './longscript.sh'
+tmux attach -t mysession   # reattach later
 \`\`\`
 
-## Process Priority
+## Process Priority with nice
 
 \`\`\`bash
-# Nice value: -20 (highest priority) to 19 (lowest)
-nice -n 10 ./backup.sh    # start with lower priority
-nice -n -5 ./critical.sh  # start with higher priority (root only for negative)
+# Nice value: -20 = highest priority, 19 = lowest
+# Default nice = 0
+# Only root can set negative nice values (increase priority)
 
-renice 15 -p 1234         # change priority of running process
-renice -n 5 -u alice      # change all of alice's processes
+nice -n 10 ./backup.sh          # start with lower priority (be nice to others)
+nice -n 19 ./batch-job.sh       # lowest priority (background work)
+nice -n -10 ./critical.sh       # higher priority (root only for negative)
+
+renice 15 -p 1234               # change running process's priority
+renice -n 5 -u alice            # change all alice's processes
+renice -n -5 -g database-team   # change all processes in a group
+
+# See priorities in top: PR column = actual priority, NI = nice value
+# PR = 20 + NI (so nice=0 → PR=20, nice=-20 → PR=0, nice=19 → PR=39)
 \`\`\`
 
-## System Resources
+## System Resource Monitoring
 
 \`\`\`bash
-free -h                   # memory usage
-vmstat 2 5                # virtual memory stats (every 2s, 5 times)
-iostat -x 2               # I/O stats per disk
-uptime                    # load averages (1min, 5min, 15min)
-# Load avg > number of CPU cores = system overloaded
-nproc                     # number of CPU cores
-lscpu                     # CPU details
+free -h                   # RAM and swap usage in human-readable form
+# total    used    free   shared  buff/cache  available
+# Mem:     15G     4.2G   2.1G    234M        8.7G        11G
+# Swap:    2.0G    0B     2.0G
+# 'available' > 'free' because Linux uses free RAM for disk cache
+# Swap usage > 0 means you have a memory pressure problem
+
+vmstat 2 5                # virtual memory stats: 5 reports every 2 seconds
+# procs ---------memory---------- ---swap-- -----io---- -system-- ------cpu-----
+# r  b   swpd   free   buff  cache   si   so    bi    bo   in   cs us sy id wa st
+# r = runnable processes, b = blocked in D state, wa = % waiting on I/O
+
+iostat -x 2               # per-device I/O stats (requires sysstat package)
+# %util = how busy the disk is (100% = saturated)
+# await = average wait time for I/O in milliseconds
+
+uptime                    # 1min, 5min, 15min load averages
+# 10:15:22 up 45 days, load average: 2.15, 1.85, 1.20
+# Load average = average number of runnable + D-state processes over the time period
+# If load > nproc (number of CPUs): system is overloaded
+nproc                     # number of CPU cores (compare against load avg)
 \`\`\`
+
+## Common Mistakes
+
+**Sending SIGKILL first**: Always try SIGTERM first and wait 5-30 seconds. SIGKILL prevents the process from flushing buffers, releasing locks, cleaning up temp files, or completing in-progress transactions. Databases sent SIGKILL may need recovery on next startup.
+
+**Killing the wrong process**: \`killall nginx\` kills ALL processes named "nginx", including the master process and all workers. On a busy server, this drops all active connections. Use \`kill <specific-PID>\` or \`systemctl reload nginx\` instead.
+
+**Confusing load average with CPU usage**: A load average of 8 on a 4-core system doesn't necessarily mean 200% CPU usage — it could be 4 processes waiting on disk I/O (D state). Check \`vmstat\` wa column for I/O wait.
 `,
           interviewQuestions: [
             {
@@ -909,117 +1836,310 @@ kill -15 $PID && sleep 30 && kill -9 $PID 2>/dev/null
           ],
           content: `# Systemd & Service Management
 
-Systemd is the init system for most modern Linux distributions. It starts and manages all system services.
+Systemd is the init system (PID 1) on almost every modern Linux distribution. It replaces the old SysVinit and Upstart systems. Understanding how systemd works internally — not just the commands — is what separates engineers who can debug service startup failures from those who can only restart things and hope.
+
+## Why Systemd Replaced SysVinit
+
+**SysVinit** started services serially: service A finishes, then service B starts, then C. Boot times measured in minutes were normal. It used shell scripts (\`/etc/init.d/\`) for service management — hard to parse, hard to monitor, no standardized output.
+
+**Systemd** builds a dependency graph and starts services in parallel. Boot time on modern hardware is seconds, not minutes. It captures all service output into a structured log (journald), manages resource limits via cgroups, and provides a consistent API via \`systemctl\` regardless of what language the service is written in.
+
+\`\`\`
+SysVinit (serial):                    Systemd (parallel):
+start syslog → done                   start syslog ─┐
+start networking → done               start networking ─┤ all in parallel
+start sshd → done                     start sshd ─────┤
+start postgresql → done               start postgresql ┤
+start myapp → done                    start myapp ─────┘
+Total boot: ~60 seconds               Total boot: ~5 seconds
+\`\`\`
+
+## Unit Files: The Building Block
+
+Every managed resource in systemd is a **unit**. Unit types:
+
+| Type | Extension | Purpose |
+|---|---|---|
+| Service | .service | A process/daemon |
+| Timer | .timer | Schedule (replaces cron) |
+| Socket | .socket | Socket activation |
+| Target | .target | Group of units (like a runlevel) |
+| Mount | .mount | A filesystem mount |
+| Path | .path | Watch for filesystem changes |
+| Slice | .slice | cgroup resource management |
+
+Unit files live in:
+- \`/lib/systemd/system/\` — system-provided units (packages install here)
+- \`/etc/systemd/system/\` — admin-managed units (your custom services go here)
+- \`/run/systemd/system/\` — runtime-generated units (transient, cleared on boot)
+
+Files in \`/etc/systemd/system/\` override files with the same name in \`/lib/\`. This is how you customize a package's service without modifying the package.
 
 ## systemctl — Service Control
 
 \`\`\`bash
 # Service lifecycle
-systemctl start nginx          # start service
-systemctl stop nginx           # stop service
-systemctl restart nginx        # stop + start
-systemctl reload nginx         # reload config without restart (if supported)
-systemctl status nginx         # detailed status
+systemctl start nginx           # start right now
+systemctl stop nginx            # stop right now (sends SIGTERM, then SIGKILL)
+systemctl restart nginx         # stop + start (drops all connections)
+systemctl reload nginx          # send SIGHUP to reload config (no connection drop)
+systemctl status nginx          # detailed status + last log lines + PID
 
 # Persistence across reboots
-systemctl enable nginx         # start at boot
-systemctl disable nginx        # don't start at boot
-systemctl enable --now nginx   # enable + start immediately
+systemctl enable nginx          # create a symlink in the "wants" directory
+systemctl disable nginx         # remove the symlink
+systemctl enable --now nginx    # enable AND start immediately (most common)
+systemctl disable --now nginx   # disable AND stop immediately
 
-# Query
-systemctl is-active nginx      # active or inactive
-systemctl is-enabled nginx     # enabled or disabled
-systemctl list-units --type=service --state=running
-systemctl list-unit-files --type=service
+# Query state
+systemctl is-active nginx       # exits 0 if active, non-zero if not
+systemctl is-enabled nginx      # exits 0 if enabled
+systemctl is-failed nginx       # exits 0 if in failed state
+
+# List and inspect
+systemctl list-units --type=service --state=running   # all running services
+systemctl list-units --type=service --state=failed    # all failed services
+systemctl list-unit-files --type=service              # all service unit files + enabled status
+systemctl show nginx            # all properties as key=value (machine-readable)
+systemctl cat nginx             # print the unit file content
+
+# Dependency management
+systemctl list-dependencies nginx    # what does nginx depend on?
+systemctl list-dependencies nginx --reverse  # what depends on nginx?
+
+# Prevent a service from ever starting (even if another unit wants it)
+systemctl mask nginx            # creates a symlink to /dev/null
+systemctl unmask nginx          # removes the mask
 \`\`\`
 
-## journalctl — Log Viewer
+## The Dependency Graph: Requires, Wants, After, Before
 
-\`\`\`bash
-journalctl                          # all logs (oldest first)
-journalctl -r                       # reverse (newest first)
-journalctl -f                       # follow (like tail -f)
-journalctl -n 50                    # last 50 lines
-journalctl -u nginx                 # logs for nginx service
-journalctl -u nginx -f              # follow nginx logs
-journalctl --since "2024-01-15"     # logs since date
-journalctl --since "1 hour ago"     # relative time
-journalctl -p err                   # only errors (emerg,alert,crit,err)
-journalctl -p warning..err          # warnings to errors
-journalctl --no-pager | grep "Out of memory"
+This is the most misunderstood part of systemd. There are two separate concerns:
+1. **Ordering**: when does a unit start relative to another?
+2. **Dependency**: does a unit fail if another is not present?
+
+\`\`\`ini
+[Unit]
+# ORDERING directives (does not imply dependency):
+After=network.target postgresql.service
+# This unit starts AFTER network.target and postgresql.service
+# But if postgresql is not started at all, this unit still starts
+
+Before=myapp-worker.service
+# This unit starts BEFORE myapp-worker.service
+
+# DEPENDENCY directives (does not imply ordering):
+Requires=postgresql.service
+# If postgresql fails to start, this unit also fails
+# If this unit starts and postgresql is not running, postgresql is also started
+# If postgresql later stops, this unit is also stopped
+
+Wants=redis.service
+# Soft dependency: this unit prefers redis to be running
+# But if redis fails, this unit continues anyway
+
+# In practice, combine them:
+After=postgresql.service
+Requires=postgresql.service
+# Together: "start after postgresql, and fail if postgresql fails"
 \`\`\`
 
-## Writing a Custom Service
+## Writing a Production-Quality Service Unit
 
 Create \`/etc/systemd/system/myapp.service\`:
 
 \`\`\`ini
 [Unit]
-Description=My Application Server
-Documentation=https://myapp.example.com/docs
-After=network.target postgresql.service
+Description=My Node.js Application Server
+Documentation=https://github.com/myorg/myapp/wiki/Operations
+# Start after network is up AND postgresql is running
+After=network-online.target postgresql.service
 Requires=postgresql.service
+# Soft dependencies: nice to have but not fatal if absent
+Wants=redis.service
 
 [Service]
+# Type=simple: process stays in foreground (default, correct for most apps)
+# Type=forking: process forks to background (old-style daemons)
+# Type=notify: process signals systemd when ready (advanced)
+# Type=exec: like simple but only active after exec (not fork)
 Type=simple
+
+# Security: never run as root
 User=myapp
 Group=myapp
+
+# Working directory (process is started here)
 WorkingDirectory=/opt/myapp
+
+# Environment variables
 Environment=NODE_ENV=production
 Environment=PORT=3000
-EnvironmentFile=/etc/myapp/config.env
+# EnvironmentFile: load variables from a file (one KEY=VALUE per line)
+# The leading - means: ignore the file if it's missing (don't fail)
+EnvironmentFile=-/etc/myapp/production.env
 
-ExecStart=/usr/bin/node /opt/myapp/server.js
+# Pre-start check (exits non-zero = don't start the service)
+ExecStartPre=/opt/myapp/scripts/check-config.sh
+
+# The actual process to run
+ExecStart=/usr/bin/node /opt/myapp/src/server.js
+
+# Send SIGHUP on: systemctl reload myapp
 ExecReload=/bin/kill -HUP \$MAINPID
-Restart=on-failure
-RestartSec=5s
+
+# Graceful stop: send SIGTERM, wait TimeoutStopSec, then SIGKILL
+TimeoutStopSec=30s
+
+# Restart policy
+Restart=on-failure          # restart if exits with non-zero code or signal
+                            # on-failure | always | no | on-success | on-abnormal
+RestartSec=5s               # wait 5 seconds before restart attempt
+StartLimitIntervalSec=300   # within this window...
+StartLimitBurst=5           # ...allow at most 5 restart attempts
+# After 5 failures in 300s, systemd gives up and puts service in "failed" state
+# Reset: systemctl reset-failed myapp
+
+# Logging (captured by journald)
 StandardOutput=journal
 StandardError=journal
+# SyslogIdentifier=myapp  # custom tag in logs
 
-# Security hardening
-NoNewPrivileges=true
-ProtectSystem=strict
-PrivateTmp=true
+# Resource limits (via cgroups)
+MemoryLimit=512M            # kill process if it exceeds this
+CPUQuota=200%               # max 2 full CPU cores (200% = 2 × 100%)
+
+# Security hardening (drop attack surface)
+NoNewPrivileges=true        # process cannot gain new privileges (no setuid)
+ProtectSystem=strict        # /usr, /boot, /etc are read-only (app can't modify them)
+ProtectHome=true            # /home, /root are invisible
+PrivateTmp=true             # private /tmp namespace (not shared with other services)
+PrivateDevices=true         # no access to /dev except basics
 
 [Install]
-WantedBy=multi-user.target
+# Which target "wants" this service (where it gets enabled)
+WantedBy=multi-user.target  # normal multiuser system (what you want for most services)
 \`\`\`
 
 \`\`\`bash
-systemctl daemon-reload           # reload unit files after changes
-systemctl enable --now myapp
-systemctl status myapp
-journalctl -u myapp -f
+# After creating or modifying a unit file:
+systemctl daemon-reload           # tell systemd to re-read unit files
+systemctl enable --now myapp      # enable and start
+systemctl status myapp            # verify it started correctly
+journalctl -u myapp -f            # stream logs
 \`\`\`
 
-## Systemd Targets (Runlevels)
+## cgroups: How Systemd Controls Resources
+
+systemd uses the kernel's **cgroup** (control group) mechanism to enforce resource limits. Every service runs in its own cgroup slice:
 
 \`\`\`bash
-systemctl get-default             # current default target
-systemctl set-default multi-user.target  # no GUI on boot
+# See systemd's cgroup hierarchy
+systemd-cgls
 
-# Common targets:
-# poweroff.target  — shutdown
-# rescue.target    — single-user (recovery)
-# multi-user.target — normal (no GUI)
-# graphical.target  — normal + GUI
+# See resource usage per service (like top for services)
+systemd-cgtop
+
+# Check a specific service's cgroup
+cat /sys/fs/cgroup/system.slice/myapp.service/memory.current
+# 234881024  ← bytes of RAM currently used
+
+# Check memory limit
+cat /sys/fs/cgroup/system.slice/myapp.service/memory.max
+# 536870912  ← 512MB limit set by MemoryLimit=512M
+
+# cgroups also give you exact resource accounting:
+systemctl status nginx
+# ...
+#    CGroup: /system.slice/nginx.service
+#            ├─ 1234 nginx: master process /usr/sbin/nginx
+#            └─ 1235 nginx: worker process
 \`\`\`
 
-## Timers (Cron Alternative)
+## journalctl — Structured Logging
+
+journald captures all service output (stdout/stderr), kernel messages, and syslog messages into a binary, indexed, structured log. This makes querying much faster than grepping text files.
 
 \`\`\`bash
-# /etc/systemd/system/backup.timer
-# [Unit]
-# Description=Daily Backup Timer
-# [Timer]
-# OnCalendar=daily
-# Persistent=true
-# [Install]
-# WantedBy=timers.target
+journalctl                          # ALL logs, oldest first (very verbose)
+journalctl -r                       # reverse order (newest first)
+journalctl -f                       # follow in real-time (like tail -f)
+journalctl -n 50                    # last 50 lines
+journalctl -u nginx                 # logs for the nginx service unit
+journalctl -u nginx -u postgresql   # multiple units
+journalctl -u nginx -f              # follow nginx logs
 
-systemctl enable --now backup.timer
-systemctl list-timers
+# Time filtering
+journalctl --since "2024-01-15 10:00:00"
+journalctl --since "1 hour ago" --until "30 minutes ago"
+journalctl --since today
+journalctl --since yesterday
+journalctl -b                       # current boot only
+journalctl -b -1                    # previous boot (great for crash investigation)
+journalctl --list-boots             # show all boot sessions with timestamps
+
+# Priority filtering (syslog levels)
+journalctl -p err                   # err and worse (emerg, alert, crit, err)
+journalctl -p warning               # warning and worse
+journalctl -p warning..err          # range: only warnings and errors
+journalctl -u nginx -p err --since "1 hour ago"  # nginx errors in last hour
+
+# Output format
+journalctl -o json | jq '.MESSAGE'  # JSON output for log shippers
+journalctl -o json-pretty           # pretty-printed JSON
+journalctl -o cat                   # message only, no metadata
+
+# Disk usage management
+journalctl --disk-usage
+journalctl --vacuum-time=30d        # delete logs older than 30 days
+journalctl --vacuum-size=1G         # trim to 1GB
 \`\`\`
+
+## Systemd Targets: Replacing Runlevels
+
+Targets are groups of units. They replace the concept of runlevels (0-6) from SysVinit:
+
+\`\`\`bash
+# Traditional runlevel → systemd target mapping
+# runlevel 0  →  poweroff.target
+# runlevel 1  →  rescue.target (single-user, maintenance)
+# runlevel 2,3,4  →  multi-user.target (normal, no GUI)
+# runlevel 5  →  graphical.target (normal + GUI)
+# runlevel 6  →  reboot.target
+
+systemctl get-default                      # what target boots into
+systemctl set-default multi-user.target    # boot without GUI (server mode)
+systemctl isolate rescue.target            # switch to rescue mode NOW (careful!)
+\`\`\`
+
+## How It Works Internally: Parallel Startup
+
+When systemd starts, it reads all unit files and builds a directed acyclic graph (DAG) of dependencies. It then starts units as soon as their dependencies are satisfied — multiple units start simultaneously:
+
+\`\`\`
+systemd (PID 1)
+│
+├── Immediately: network-pre.target, local-fs.target, ...
+│
+├── After network-pre: dhclient (get IP), ...
+│
+├── After network.target: resolved (DNS), sshd, ...
+│
+└── After postgresql.service: myapp.service
+    (because: After=postgresql.service in myapp's unit file)
+\`\`\`
+
+Socket activation is another optimization: systemd creates the socket for a service (so clients can connect immediately) but doesn't start the service binary until the first connection arrives. This further reduces boot time.
+
+## Common Mistakes
+
+**daemon-reload is required**: After creating or editing a unit file, \`systemctl daemon-reload\` must be run before systemd sees the changes. Forgetting this means your edits have no effect.
+
+**Restart=always vs on-failure**: \`Restart=always\` restarts even after a clean exit (\`exit 0\`). This can create infinite loops for scripts that are supposed to run once. Use \`Restart=on-failure\` for servers and \`Type=oneshot\` with no Restart for scripts.
+
+**After vs Requires**: \`After\` alone does not create a dependency — it only controls ordering. If you write \`After=postgresql.service\` without \`Requires=\`, your service starts after postgresql IF postgresql is being started anyway, but will not fail if postgresql is not started at all.
+
+**Hitting StartLimitBurst**: A crashing service that keeps restarting will eventually hit the burst limit and enter the "failed" state, stopping all restarts. Run \`systemctl reset-failed myapp\` after fixing the underlying issue to clear the counter.
 `,
           interviewQuestions: [
             {
