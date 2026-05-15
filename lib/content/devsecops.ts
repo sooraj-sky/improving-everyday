@@ -3003,6 +3003,672 @@ git cherry-pick <hotfix-sha>
             },
           ],
         },
+        {
+          id: "deployment-formats",
+          title: "How Software Gets Deployed: Formats & Packaging",
+          duration: 40,
+          type: "lesson" as const,
+          description: "Understand every deployment format — Docker images, Helm charts, JAR/WAR files, Lambda ZIPs, native packages, and raw code — with the pipeline steps for each and when to use which.",
+          content: `# How Software Gets Deployed: Formats & Packaging
+
+A CI pipeline's job is to turn source code into a **deployable artifact**. The format of that artifact fundamentally shapes how your deployment pipeline works, what your rollback strategy looks like, and how you promote between environments. Understanding each format — and its trade-offs — is core DevOps knowledge.
+
+## Format 1: Container Images (Docker)
+
+The dominant deployment format for modern applications. You build a Docker image, push it to a registry (ECR, DockerHub, GHCR), and your orchestrator (Kubernetes, ECS) pulls and runs it.
+
+**Why containers won:** The image is immutable and self-contained — it bundles your application code, runtime (Node.js, Python, JVM), system libraries, and configuration defaults. "It works on my machine" disappears because dev, staging, and prod all run the identical image bytes.
+
+**Pipeline flow:**
+\`\`\`
+Code push
+  → Lint + Unit tests
+  → docker build -t myapp:\${GIT_SHA} .
+  → docker push registry.io/myapp:\${GIT_SHA}
+  → Image vulnerability scan (Trivy/Grype)
+  → Deploy image tag to dev (kubectl set image / helm upgrade)
+  → Integration tests against dev
+  → Promote same image tag to staging
+  → Promote same image tag to prod (manual gate)
+\`\`\`
+
+The image tag (\`\${GIT_SHA}\`) is the immutable handle. The exact same bytes that passed tests in dev are what land in prod — no rebuild.
+
+\`\`\`bash
+# Build with multiple tags for traceability
+docker build \\
+  -t registry.io/myapp:\${GIT_SHA} \\
+  -t registry.io/myapp:main-latest \\
+  --label git.sha=\${GIT_SHA} \\
+  --label build.date=$(date -u +%Y-%m-%dT%H:%M:%SZ) \\
+  --label build.pipeline=\${CI_PIPELINE_ID} \\
+  .
+
+docker push registry.io/myapp:\${GIT_SHA}
+\`\`\`
+
+**Signing container images** (supply chain security):
+\`\`\`bash
+# Sign after push using cosign (Sigstore)
+cosign sign --key cosign.key registry.io/myapp:\${GIT_SHA}
+
+# Verify before deploy
+cosign verify --key cosign.pub registry.io/myapp:\${GIT_SHA}
+\`\`\`
+
+## Format 2: Helm Charts (Kubernetes)
+
+Helm is the package manager for Kubernetes. A Helm **chart** is a templated collection of Kubernetes YAML files (Deployments, Services, ConfigMaps, Ingress, etc.). You deploy a chart with values specific to each environment — the chart template is reused, the values change.
+
+**Chart structure:**
+\`\`\`
+charts/myapp/
+├── Chart.yaml          # chart name, version, appVersion
+├── values.yaml         # default values (lowest priority)
+├── values-dev.yaml     # dev overrides
+├── values-staging.yaml # staging overrides
+├── values-prod.yaml    # prod overrides
+└── templates/
+    ├── deployment.yaml
+    ├── service.yaml
+    ├── ingress.yaml
+    ├── configmap.yaml
+    └── hpa.yaml        # Horizontal Pod Autoscaler
+\`\`\`
+
+**Deployment pipeline with Helm:**
+\`\`\`bash
+# Build and push image
+docker build -t registry.io/myapp:\${APP_VERSION} .
+docker push registry.io/myapp:\${APP_VERSION}
+
+# Deploy to dev
+helm upgrade --install myapp ./charts/myapp \\
+  --namespace dev \\
+  --values ./charts/myapp/values-dev.yaml \\
+  --set image.tag=\${APP_VERSION} \\
+  --set image.repository=registry.io/myapp \\
+  --atomic \\          # roll back automatically if deploy fails
+  --timeout 5m \\
+  --wait              # wait for all pods to be ready
+
+# Verify health before promoting
+kubectl rollout status deployment/myapp -n dev
+curl -sf https://dev.myapp.internal/health | jq '.status == "ok"'
+
+# Same chart, same image tag, different values for staging
+helm upgrade --install myapp ./charts/myapp \\
+  --namespace staging \\
+  --values ./charts/myapp/values-staging.yaml \\
+  --set image.tag=\${APP_VERSION}
+\`\`\`
+
+**Packaging and versioning charts** (for chart promotion):
+\`\`\`bash
+# Package chart into a .tgz for storage in artifact registry
+helm package ./charts/myapp --version 1.3.0 --app-version \${APP_VERSION}
+# → myapp-1.3.0.tgz
+
+# Push to OCI chart registry (e.g., ECR, Harbor, GitLab)
+helm push myapp-1.3.0.tgz oci://registry.io/helm-charts
+
+# Deploy from registry (not from local filesystem)
+helm upgrade --install myapp oci://registry.io/helm-charts/myapp \\
+  --version 1.3.0 \\
+  --values values-prod.yaml \\
+  --set image.tag=\${APP_VERSION}
+\`\`\`
+
+**Helm history and rollback:**
+\`\`\`bash
+helm history myapp -n production
+# REVISION  STATUS     CHART       APP VERSION  DESCRIPTION
+# 42        superseded myapp-1.2.0 v2.1.0       Upgrade complete
+# 43        deployed   myapp-1.3.0 v2.2.0       Upgrade complete
+
+# Instant rollback to previous revision
+helm rollback myapp 42 -n production
+\`\`\`
+
+## Format 3: JAR / WAR Files (JVM Applications)
+
+Java applications compile to JAR (Java Archive) or WAR (Web Application Archive) files. A JAR contains compiled class files, resources, and dependencies. A WAR is a JAR structured for deployment into a servlet container like Tomcat.
+
+**Fat JAR (Uber JAR)** — All dependencies bundled into one file. Spring Boot's default output is a fat JAR. Self-contained: \`java -jar myapp.jar\`. No dependency classpath to manage.
+
+**Thin JAR** — Only your compiled code; dependencies are on the classpath. Faster to build and transfer (only your code changes), but requires the runtime and dependency JARs to be present.
+
+**Pipeline flow for a Spring Boot app:**
+\`\`\`bash
+# Build
+./mvnw clean package -DskipTests  # or: ./gradlew bootJar
+
+# The JAR is the artifact
+ls target/myapp-1.3.0.jar
+
+# Upload to Nexus/Artifactory
+mvn deploy:deploy-file \\
+  -DgroupId=com.company \\
+  -DartifactId=myapp \\
+  -Dversion=1.3.0 \\
+  -Dpackaging=jar \\
+  -Dfile=target/myapp-1.3.0.jar \\
+  -DrepositoryId=releases \\
+  -Durl=https://nexus.company.com/repository/maven-releases/
+
+# Deploy to a server
+scp target/myapp-1.3.0.jar deploy@appserver01:/opt/myapp/
+ssh deploy@appserver01 "
+  systemctl stop myapp
+  cp /opt/myapp/myapp-1.3.0.jar /opt/myapp/current/myapp.jar
+  systemctl start myapp
+  systemctl is-active myapp
+"
+\`\`\`
+
+**Modern pattern: JAR inside a Docker image** — Most teams running JVM on Kubernetes wrap the JAR in a container:
+\`\`\`dockerfile
+FROM eclipse-temurin:21-jre-alpine
+WORKDIR /app
+COPY target/myapp-1.3.0.jar app.jar
+ENTRYPOINT ["java", "-jar", "app.jar"]
+\`\`\`
+This gives you all the benefits of container immutability while keeping the JVM ecosystem.
+
+## Format 4: Lambda Deployment Packages (ZIP & Container)
+
+AWS Lambda accepts two artifact types: a ZIP file containing your function code and dependencies, or a container image (ECR).
+
+**ZIP deployment (Node.js example):**
+\`\`\`bash
+# Install only production dependencies
+npm ci --production
+
+# Zip function code + node_modules
+zip -r function.zip index.js node_modules/
+
+# Deploy via AWS CLI
+aws lambda update-function-code \\
+  --function-name my-function \\
+  --zip-file fileb://function.zip
+
+# Publish a version (immutable snapshot)
+VERSION=$(aws lambda publish-version \\
+  --function-name my-function \\
+  --query 'Version' --output text)
+
+# Point alias to new version
+aws lambda update-alias \\
+  --function-name my-function \\
+  --name prod \\
+  --function-version $VERSION
+
+# Weighted alias for canary (10% to new version)
+aws lambda update-alias \\
+  --function-name my-function \\
+  --name prod \\
+  --routing-config AdditionalVersionWeights={"$VERSION"=0.1}
+\`\`\`
+
+**Lambda container image (for larger functions, >50 MB):**
+\`\`\`dockerfile
+FROM public.ecr.aws/lambda/python:3.12
+COPY requirements.txt .
+RUN pip install -r requirements.txt --target \${LAMBDA_TASK_ROOT}
+COPY app.py \${LAMBDA_TASK_ROOT}
+CMD ["app.handler"]
+\`\`\`
+
+## Format 5: Raw Code / Source-Based Deployment
+
+Some platforms deploy source code directly rather than compiled artifacts:
+- **PaaS platforms** (Heroku, Railway, Render, Google App Engine): push code, platform builds and runs it
+- **PHP/Python/Ruby applications**: rsync or git pull directly to servers (simpler setups)
+- **Ansible/Chef/Puppet**: configuration management tools that sync code files to servers
+
+\`\`\`bash
+# Simple rsync deployment (small apps, legacy systems)
+rsync -avz --delete \\
+  --exclude='.git' \\
+  --exclude='node_modules' \\
+  --exclude='.env' \\
+  ./dist/ deploy@webserver:/var/www/myapp/
+
+# Or: git pull on the server (only if the server can reach your repo)
+ssh deploy@webserver "
+  cd /var/www/myapp
+  git fetch origin
+  git checkout v1.3.0
+  composer install --no-dev
+  php artisan migrate --force
+  php artisan config:cache
+  sudo systemctl reload php8.2-fpm
+"
+\`\`\`
+
+## Format 6: Infrastructure-as-Code (Terraform/CloudFormation)
+
+"Deploying" infrastructure is a separate pipeline from application deployments. The artifact is a plan — a calculated diff of what infrastructure changes will be applied.
+
+\`\`\`bash
+# Terraform pipeline
+terraform init
+terraform validate
+terraform plan -out=tfplan    # generate plan artifact
+# → Human/automation reviews plan
+terraform apply tfplan         # apply exactly the plan reviewed
+
+# Store plan artifact in CI for audit trail
+aws s3 cp tfplan s3://terraform-plans/\${CI_PIPELINE_ID}/tfplan
+\`\`\`
+
+## Format 7: Native OS Packages (RPM/DEB)
+
+For applications that need to integrate with systemd, install binaries to PATH, or be managed by OS package managers:
+
+\`\`\`bash
+# Build an RPM
+rpmbuild -ba myapp.spec
+# → myapp-1.3.0-1.x86_64.rpm
+
+# Upload to YUM/APT repository
+aws s3 cp myapp-1.3.0-1.x86_64.rpm s3://packages.company.com/el9/
+
+# Deploy via Ansible
+- name: Install myapp
+  yum:
+    name: myapp-1.3.0
+    state: present
+  notify: restart myapp
+\`\`\`
+
+## Choosing a Deployment Format
+
+| Application type | Recommended format |
+|---|---|
+| Kubernetes-based services | Container image + Helm chart |
+| AWS Lambda | ZIP or container image |
+| JVM microservices on K8s | Fat JAR inside Docker image |
+| Traditional JVM on VMs | JAR deployed via Ansible/Systemd |
+| Static frontends | S3 + CloudFront (raw files) |
+| ML models | Container image or SageMaker model artifact |
+| Infrastructure | Terraform plan |
+| Legacy PHP/Ruby on VMs | rsync + git pull |`,
+          interviewQuestions: [
+            {
+              question: "Why is it important that the same artifact (image tag) is deployed to dev, staging, and prod rather than rebuilding for each environment?",
+              answer: "Rebuilding for each environment breaks the fundamental guarantee of environment promotion: that what you tested is what you deploy. Even with identical source code, a rebuild can produce a different artifact due to: dependency version resolution (floating versions like ^1.2 may resolve to a newer patch), different base image layers pulled from the registry, build environment differences, or non-deterministic build steps. The immutable artifact pattern — build once, tag with git SHA, promote the same tag — guarantees that the binary in production is byte-for-byte identical to what passed every test gate. Environment-specific configuration is injected at runtime via Helm values files, environment variables, or a config management service.",
+              difficulty: "mid" as const,
+            },
+            {
+              question: "What is the difference between a Helm chart version and an app version, and how do you manage them?",
+              answer: "In Chart.yaml, 'version' is the Helm chart version (the packaging and templates), while 'appVersion' is the application version (the Docker image tag). They're independent: the chart templates can change (version 1.3.0 → 1.3.1) without the application code changing, and the application image can update (appVersion bumps) without chart template changes. Best practice: keep chart version in semver and increment it when chart templates change; set appVersion to the git SHA or semantic version of the application. In the pipeline, pass the image tag via --set image.tag= rather than appVersion, since appVersion in Chart.yaml is metadata and doesn't control which image is pulled — your deployment.yaml template determines that.",
+              difficulty: "senior" as const,
+            },
+          ],
+        },
+        {
+          id: "standard-pipeline-workflow",
+          title: "Standard CI/CD Pipeline Workflow End-to-End",
+          duration: 45,
+          type: "lesson" as const,
+          description: "A complete walkthrough of a production-grade CI/CD pipeline from code push to production, covering environment promotion, verification gates, artifact management, and rollback strategies.",
+          content: `# Standard CI/CD Pipeline Workflow End-to-End
+
+A production-grade pipeline is not just "run tests, deploy." It's a sequence of increasingly expensive verification gates, with automated promotion when confidence is high and human gates where the risk warrants it. Here is the complete, standard workflow used by mature engineering teams.
+
+## The Full Pipeline: Code to Production
+
+\`\`\`
+Developer pushes to feature branch
+       │
+       ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ MR/PR PIPELINE (runs on every commit to feature branch)         │
+│                                                                 │
+│  ① Lint + Format Check (~30s)                                   │
+│  ② Unit Tests + Code Coverage Gate (~2-5m, parallel)            │
+│  ③ SAST scan + Secret Detection (~2m, parallel)                 │
+│  ④ Build Docker image (not pushed yet) (~2-5m)                  │
+│  ⑤ SCA / Dependency vulnerability scan (~1m)                    │
+│                                                                 │
+│  GATE: All must pass. MR cannot be merged if any fail.          │
+└─────────────────────────────────────────────────────────────────┘
+       │ MR approved + merged to main
+       ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ MAIN BRANCH PIPELINE (runs on every merge to main)              │
+│                                                                 │
+│  ① Build final Docker image                                     │
+│     → Tag: registry.io/myapp:abc1234 (git SHA)                  │
+│     → Push to registry                                          │
+│  ② Container image vulnerability scan (Trivy)                   │
+│  ③ Sign image (cosign)                                          │
+│  ④ Publish build metadata (SBOM to artifact store)              │
+│                                                                 │
+│  GATE: Image must have no CRITICAL CVEs. Scan must pass.        │
+└─────────────────────────────────────────────────────────────────┘
+       │
+       ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ DEPLOY TO DEV (automated, no approval)                          │
+│                                                                 │
+│  helm upgrade --install myapp ... --set image.tag=abc1234       │
+│  → Wait for rollout (kubectl rollout status)                    │
+│  → Run smoke tests (health check endpoints)                     │
+│  → Run API contract tests                                       │
+│                                                                 │
+│  GATE: Smoke tests must pass. Rollout must complete in 5m.      │
+└─────────────────────────────────────────────────────────────────┘
+       │ auto (on green dev)
+       ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ DEPLOY TO STAGING (automated, no approval)                      │
+│                                                                 │
+│  Same image tag, staging Helm values                            │
+│  → Integration tests (full suite, real DB)                      │
+│  → E2E tests (Playwright/Cypress against staging)               │
+│  → Performance baseline check                                   │
+│  → DAST scan (OWASP ZAP against staging URL)                    │
+│                                                                 │
+│  GATE: E2E must pass. No P0 performance regression.             │
+└─────────────────────────────────────────────────────────────────┘
+       │ manual approval (or auto on off-hours)
+       ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ DEPLOY TO PRODUCTION (human-gated)                              │
+│                                                                 │
+│  ① Change ticket auto-created, linked to pipeline               │
+│  ② Approver verifies staging passed, reviews diff               │
+│  ③ Canary deploy: 5% traffic to new version                     │
+│  ④ Monitor error rates + latency for 10 minutes                 │
+│  ⑤ Full rollout or automatic rollback                           │
+│                                                                 │
+│  POST-DEPLOY: Smoke tests on production + alert watchdog        │
+└─────────────────────────────────────────────────────────────────┘
+\`\`\`
+
+## Stage-by-Stage: What Runs and Why
+
+### Stage 1: Lint and Static Analysis (30 seconds)
+
+Run first because it's cheapest. A syntax error shouldn't wait for a 5-minute build.
+
+\`\`\`yaml
+# GitLab CI example
+lint:
+  stage: validate
+  script:
+    - eslint src/ --max-warnings 0   # JS/TS
+    - black --check .                # Python
+    - golangci-lint run ./...        # Go
+    - hadolint Dockerfile            # Dockerfile
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+\`\`\`
+
+### Stage 2: Unit Tests with Coverage Gate
+
+\`\`\`yaml
+unit-tests:
+  stage: test
+  script:
+    - npm run test:coverage
+  coverage: '/Lines\s*:\s*(\d+\.?\d*)%/'
+  artifacts:
+    reports:
+      junit: test-results.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage/cobertura-coverage.xml
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      variables:
+        COVERAGE_MIN: "80"  # enforce coverage gate on MRs
+\`\`\`
+
+**Coverage gate:** Block merges where coverage drops below a threshold. But measure coverage meaningfully — 80% of meaningful logic tested is better than 100% of trivial getters/setters.
+
+### Stage 3: Build and Push Image
+
+\`\`\`yaml
+build-image:
+  stage: build
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH  # only on main
+  variables:
+    IMAGE: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+  script:
+    - docker buildx build
+        --platform linux/amd64,linux/arm64
+        --cache-from type=registry,ref=$CI_REGISTRY_IMAGE:cache
+        --cache-to type=registry,ref=$CI_REGISTRY_IMAGE:cache,mode=max
+        --tag $IMAGE
+        --push
+        .
+    - echo "IMAGE_TAG=$CI_COMMIT_SHORT_SHA" >> build.env
+  artifacts:
+    reports:
+      dotenv: build.env  # passes IMAGE_TAG to downstream jobs
+\`\`\`
+
+### Stage 4: Container Scan
+
+\`\`\`yaml
+container-scan:
+  stage: scan
+  needs: [build-image]
+  variables:
+    IMAGE: $CI_REGISTRY_IMAGE:$IMAGE_TAG
+  script:
+    - trivy image
+        --exit-code 1
+        --severity CRITICAL
+        --ignore-unfixed
+        --format sarif
+        --output trivy-report.sarif
+        $IMAGE
+  artifacts:
+    reports:
+      sast: trivy-report.sarif
+  allow_failure: false  # CRITICAL CVEs block pipeline
+\`\`\`
+
+### Stage 5: Deploy to Dev (Automatic)
+
+\`\`\`yaml
+deploy-dev:
+  stage: deploy-dev
+  needs: [container-scan]
+  environment:
+    name: dev
+    url: https://dev.myapp.internal
+  script:
+    # Verify the image signature before deploying
+    - cosign verify --key cosign.pub $CI_REGISTRY_IMAGE:$IMAGE_TAG
+
+    # Deploy with Helm
+    - helm upgrade --install myapp ./charts/myapp
+        --namespace dev
+        --values charts/myapp/values-dev.yaml
+        --set image.repository=$CI_REGISTRY_IMAGE
+        --set image.tag=$IMAGE_TAG
+        --atomic
+        --timeout 5m
+
+    # Wait for rollout
+    - kubectl rollout status deployment/myapp -n dev --timeout=5m
+
+    # Smoke tests
+    - |
+      for endpoint in /health /ready /version; do
+        STATUS=$(curl -sf -o /dev/null -w "%{http_code}" https://dev.myapp.internal$endpoint)
+        [ "$STATUS" = "200" ] || (echo "Smoke test failed: $endpoint returned $STATUS" && exit 1)
+      done
+\`\`\`
+
+### Stage 6: Integration & E2E Tests
+
+\`\`\`yaml
+integration-tests:
+  stage: test-staging
+  needs: [deploy-staging]
+  script:
+    - pytest tests/integration/ -v --tb=short
+        --junit-xml=integration-results.xml
+  artifacts:
+    reports:
+      junit: integration-results.xml
+
+e2e-tests:
+  stage: test-staging
+  needs: [deploy-staging]
+  image: mcr.microsoft.com/playwright:v1.40.0-jammy
+  script:
+    - npx playwright test --reporter=html
+  artifacts:
+    when: always
+    paths:
+      - playwright-report/
+    expire_in: 7 days
+\`\`\`
+
+### Stage 7: Production Deploy with Canary
+
+\`\`\`yaml
+deploy-prod-canary:
+  stage: deploy-prod
+  when: manual  # requires human click after staging passes
+  environment:
+    name: production
+    url: https://myapp.com
+  script:
+    # Deploy canary (5% traffic) using Argo Rollouts
+    - kubectl argo rollouts set image myapp myapp=$CI_REGISTRY_IMAGE:$IMAGE_TAG -n production
+    # Argo Rollouts automatically starts the canary steps from the Rollout manifest
+    - echo "Canary deployed. Monitor at https://grafana.internal/d/myapp-canary"
+
+deploy-prod-promote:
+  stage: deploy-prod
+  when: manual  # second manual gate after watching canary metrics
+  needs: [deploy-prod-canary]
+  script:
+    - kubectl argo rollouts promote myapp -n production
+\`\`\`
+
+## Environment Promotion Rules
+
+The key principle: **environments are promotion gates, not rebuild targets**.
+
+| Promotion | Trigger | Gate |
+|---|---|---|
+| Build → Dev | Merge to main | Container scan passes |
+| Dev → Staging | Dev smoke tests pass | Automatic |
+| Staging → Prod | Staging E2E pass + manual | Human approval |
+| Canary → Full prod | Canary metrics pass | Human or automated |
+
+**Never rebuild the image when promoting.** The pipeline passes the image tag as an artifact variable between stages. The same tag flows from dev → staging → prod.
+
+## Automated Verification After Deploy
+
+After each deploy, run automated verification before marking the deploy complete:
+
+\`\`\`bash
+#!/bin/bash
+# post-deploy-verify.sh — runs after every helm upgrade
+
+NAMESPACE=$1
+SERVICE_URL=$2
+MAX_RETRIES=12
+SLEEP=10
+
+echo "Verifying deployment to $NAMESPACE..."
+
+# 1. Check all pods are running
+kubectl wait --for=condition=ready pod -l app=myapp -n $NAMESPACE --timeout=120s
+
+# 2. Check no pod restarts (CrashLoopBackOff detection)
+RESTARTS=$(kubectl get pods -n $NAMESPACE -l app=myapp -o jsonpath='{.items[*].status.containerStatuses[*].restartCount}')
+if [ "$RESTARTS" -gt "0" ]; then
+  echo "ERROR: Pods are restarting. Possible CrashLoopBackOff."
+  kubectl logs -l app=myapp -n $NAMESPACE --previous
+  exit 1
+fi
+
+# 3. Smoke test with retry
+for i in $(seq 1 $MAX_RETRIES); do
+  STATUS=$(curl -sf -o /dev/null -w "%{http_code}" $SERVICE_URL/health 2>/dev/null)
+  if [ "$STATUS" = "200" ]; then
+    echo "Health check passed after $i attempt(s)"
+    break
+  fi
+  echo "Attempt $i/$MAX_RETRIES: HTTP $STATUS. Retrying in \${SLEEP}s..."
+  sleep $SLEEP
+  if [ "$i" = "$MAX_RETRIES" ]; then
+    echo "ERROR: Service unhealthy after $MAX_RETRIES attempts"
+    exit 1
+  fi
+done
+
+# 4. Check error rate via metrics (if Prometheus available)
+ERROR_RATE=$(curl -sf "http://prometheus:9090/api/v1/query?query=rate(http_requests_total{status=~'5..'}[2m])" | jq '.data.result[0].value[1] // "0"')
+if (( $(echo "$ERROR_RATE > 0.01" | bc -l) )); then
+  echo "ERROR: Error rate $ERROR_RATE > 1% threshold post-deploy"
+  exit 1
+fi
+
+echo "Deployment verification complete. All checks passed."
+\`\`\`
+
+## Rollback Strategy
+
+**Helm rollback (fastest):** \`helm rollback myapp -n production\` — reverts to the previous Helm release in seconds. The old image is still in the registry.
+
+**Argo Rollouts abort (for canary):** \`kubectl argo rollouts abort myapp\` — immediately routes 100% traffic back to the stable version.
+
+**GitOps rollback (Flux/ArgoCD):** Revert the commit that changed the image tag in the GitOps repo. The GitOps controller reconciles and re-deploys the old tag.
+
+**What NOT to do:** Don't redeploy by running the pipeline again from source. This rebuilds the image, which takes time and changes the artifact. Always roll back to the previously known-good artifact.
+
+## Tracking Deployments
+
+\`\`\`bash
+# Create a deployment record in your CMDB/change management
+curl -X POST https://servicenow.company.com/api/sn_chg_rest/v1/change/emergency \\
+  -H "Authorization: Bearer $SN_TOKEN" \\
+  -d "{
+    'short_description': 'Deploy myapp $IMAGE_TAG to production',
+    'description': 'Pipeline $CI_PIPELINE_ID, commit $CI_COMMIT_SHA, deployed by $GITLAB_USER_LOGIN',
+    'assignment_group': 'platform-team',
+    'start_date': '$(date -u +%Y-%m-%dT%H:%M:%SZ)'
+  }"
+
+# Annotate Grafana deployment markers
+curl -X POST https://grafana.internal/api/annotations \\
+  -H "Authorization: Bearer $GRAFANA_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d "{
+    'text': 'Deploy: myapp $IMAGE_TAG',
+    'tags': ['deploy', 'myapp', 'production'],
+    'time': $(date +%s000)
+  }"
+\`\`\`
+
+These annotations appear as vertical lines on Grafana dashboards, making it immediately obvious when a deploy correlates with a latency spike or error rate increase.`,
+          interviewQuestions: [
+            {
+              question: "Describe a production deployment pipeline for a containerized microservice end to end.",
+              answer: "1) Developer merges feature branch to main. 2) Pipeline builds Docker image tagged with git SHA, pushes to ECR. 3) Trivy scans the image for critical CVEs — fails pipeline if found. 4) Image is signed with cosign. 5) Helm deploys the image to dev namespace, smoke tests verify the health endpoint. 6) On success, same image tag deploys to staging. Integration tests and E2E tests run. 7) A human reviews staging results and approves production deploy. 8) Canary deploys at 5% traffic via Argo Rollouts. Error rate and latency are monitored for 10 minutes. 9) If metrics are healthy, rollout promotes to 100%. If not, automatic rollback. 10) Post-deploy verification script confirms pod health. Grafana deployment annotation is created for correlation with metrics.",
+              difficulty: "mid" as const,
+            },
+            {
+              question: "Production has an outage caused by the latest deploy. What are your rollback options and which do you choose first?",
+              answer: "Fastest option first: 1) Helm rollback: 'helm rollback myapp -n production' reverts to the previous release in ~30 seconds. The previous image is already in the registry, no rebuild needed. Use this first. 2) If using Argo Rollouts canary: 'kubectl argo rollouts abort myapp' immediately routes all traffic back to stable. 3) GitOps (if using Flux/ArgoCD): revert the commit in the GitOps repo that updated the image tag — the controller reconciles and redeploys the previous tag within 60 seconds. Never wait for a full pipeline rerun during an outage — that rebuilds the image (takes 5+ minutes) and is unnecessary. While rolling back, annotate the Grafana dashboard and open an incident. Root-cause the issue before re-deploying.",
+              difficulty: "senior" as const,
+            },
+          ],
+        },
       ],
     },
     {

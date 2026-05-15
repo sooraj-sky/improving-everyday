@@ -14,6 +14,8 @@ import { sshProtocolsTrack } from "./ssh-protocols";
 import { scriptingTrack } from "./scripting";
 import { webTechnologyTrack } from "./web-technology";
 import { complianceTrack } from "./compliance";
+import { databasesTrack } from "./databases";
+import { sdlcTrack } from "./sdlc";
 import type { Track, LessonWithContext, Module, Lesson } from "./types";
 
 export * from "./types";
@@ -28,14 +30,16 @@ export const tracks: Track[] = [
   githubActionsTrack,     // 06 CI/CD
   pythonTrack,            // 07 Programming
   dockerTrack,            // 08 Containers
-  webTechnologyTrack,     // 09 Web layer
-  terraformTrack,         // 10 IaC
-  awsTrack,               // 11 Cloud
-  kubernetesTrack,        // 12 Orchestration
-  devsecopsTrack,         // 13 Advanced security/ops
-  troubleshootingTrack,   // 14 Advanced debugging
-  complianceTrack,        // 15 Governance
-  promptEngineeringTrack, // 16 AI
+  databasesTrack,         // 09 Databases
+  webTechnologyTrack,     // 10 Web layer
+  sdlcTrack,              // 11 SDLC
+  terraformTrack,         // 12 IaC
+  awsTrack,               // 13 Cloud
+  kubernetesTrack,        // 14 Orchestration
+  devsecopsTrack,         // 15 Advanced security/ops
+  troubleshootingTrack,   // 16 Advanced debugging
+  complianceTrack,        // 17 Governance
+  promptEngineeringTrack, // 18 AI
 ];
 
 export function getTrack(trackId: string): Track | undefined {
