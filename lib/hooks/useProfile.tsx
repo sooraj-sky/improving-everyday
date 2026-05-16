@@ -1,6 +1,10 @@
 "use client";
 
-import React, { createContext, useContext, useState, useEffect, useCallback } from "react";
+import React, { createContext, useContext, useState, useEffect, useCallback, lazy, Suspense } from "react";
+
+const CreateProfileModal = lazy(() =>
+  import("@/components/CreateProfileModal").then((m) => ({ default: m.CreateProfileModal }))
+);
 
 export interface Profile {
   id: string;
@@ -9,17 +13,11 @@ export interface Profile {
   bio: string;
 }
 
-const DEFAULT_PROFILES: Profile[] = [
-  { id: "alex", name: "Alex Chen", avatar: "AC", bio: "DevOps Engineer" },
-  { id: "sam", name: "Sam Rivera", avatar: "SR", bio: "Backend Developer" },
-  { id: "morgan", name: "Morgan Lee", avatar: "ML", bio: "Platform Engineer" },
-];
-
 const PROFILES_KEY = "devops-lms:profiles";
 const ACTIVE_KEY = "devops-lms:activeProfileId";
 
 function loadProfiles(): Profile[] {
-  if (typeof window === "undefined") return DEFAULT_PROFILES;
+  if (typeof window === "undefined") return [];
   try {
     const stored = localStorage.getItem(PROFILES_KEY);
     if (stored) {
@@ -27,9 +25,7 @@ function loadProfiles(): Profile[] {
       if (parsed.length > 0) return parsed;
     }
   } catch {}
-  // Seed defaults on first load
-  localStorage.setItem(PROFILES_KEY, JSON.stringify(DEFAULT_PROFILES));
-  return DEFAULT_PROFILES;
+  return [];
 }
 
 function saveProfiles(profiles: Profile[]) {
@@ -59,15 +55,17 @@ const ProfileContext = createContext<ProfileContextValue | null>(null);
 export function ProfileProvider({ children }: { children: React.ReactNode }) {
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [activeProfile, setActiveProfileState] = useState<Profile | null>(null);
+  const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
-    const loaded = loadProfiles();
-    setProfiles(loaded);
+    const found = loadProfiles();
+    setProfiles(found);
 
     const storedActiveId = localStorage.getItem(ACTIVE_KEY);
-    const active = loaded.find((p) => p.id === storedActiveId) ?? loaded[0] ?? null;
+    const active = found.find((p) => p.id === storedActiveId) ?? found[0] ?? null;
     setActiveProfileState(active);
     if (active) localStorage.setItem(ACTIVE_KEY, active.id);
+    setLoaded(true);
   }, []);
 
   const setActiveProfile = useCallback((profile: Profile) => {
@@ -114,6 +112,11 @@ export function ProfileProvider({ children }: { children: React.ReactNode }) {
   return (
     <ProfileContext.Provider value={{ profiles, activeProfile, setActiveProfile, createProfile, deleteProfile }}>
       {children}
+      {loaded && activeProfile === null && (
+        <Suspense fallback={null}>
+          <CreateProfileModal />
+        </Suspense>
+      )}
     </ProfileContext.Provider>
   );
 }
