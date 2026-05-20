@@ -26,16 +26,13 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className={`${geistSans.variable} ${geistMono.variable}`} data-scroll-behavior="smooth">
-      <head>
-        {/* Prevent flash of wrong theme on reload */}
+    <html lang="en" className={`${geistSans.variable} ${geistMono.variable}`} data-scroll-behavior="smooth" suppressHydrationWarning>
+      <body className="bg-zinc-950 text-zinc-100 antialiased" suppressHydrationWarning>
         <script
           dangerouslySetInnerHTML={{
             __html: `try{var t=localStorage.getItem('devops-lms:theme');if(t==='light')document.documentElement.classList.add('light');}catch(e){}`,
           }}
         />
-      </head>
-      <body className="bg-zinc-950 text-zinc-100 antialiased">
         <ThemeProvider>
           <ProfileProvider>{children}</ProfileProvider>
         </ThemeProvider>
